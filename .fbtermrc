@@ -1,0 +1,8 @@
+# Configuration for FbTerm
+# font family names/pixelsize used by fbterm, multiple font family names must be seperated by ','
+# and using a fixed width font as the first is strongly recommended
+font-names=JetBrainsMono Nerd Font Mono
+font-size=14
+# force font width (and/or height), usually for non-fixed width fonts
+#font-width=
+#font-height=

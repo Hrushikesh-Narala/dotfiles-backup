@@ -1,0 +1,5 @@
+#!/bin/bash
+case "$XDG_SESSION_TYPE" in
+  wayland) loginctl unlock-session ;;
+  tty) echo 0 | sudo tee /sys/class/graphics/fb0/blank >/dev/null ;;
+esac

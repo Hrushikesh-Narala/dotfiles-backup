@@ -1,0 +1,5 @@
+#!/bin/bash
+case "$XDG_SESSION_TYPE" in
+  wayland) loginctl lock-session && qdbus org.kde.kglobalaccel /component/org_kde_powerdevil org.kde.kglobalaccel.Component.invokeShortcut "Turn Off Screen" ;;
+  tty) echo 1 | sudo tee /sys/class/graphics/fb0/blank >/dev/null ;;
+esac
