@@ -1,16 +1,16 @@
 {
   "$schema": "https://github.com/fastfetch-cli/fastfetch/raw/master/doc/json_schema.json",
   "logo": {
-    "type": "builtin",
-    "source": "nobara",
+    "type": "file",
+    "source": "~/.config/fastfetch/nobara-purple.txt",
     "color": {
-      "1": "#00ff41",
-      "2": "#ff003c",
-      "3": "#00ffcc",
-      "4": "#ffffff"
+      "1": "#6B21A8"
     }
   },
   "display": {
+    "key": {
+      "type": "both"
+    },
     "separator": "  ",
     "color": {
       "keys": "#00ff41",
