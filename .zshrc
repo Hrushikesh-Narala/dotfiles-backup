@@ -28,7 +28,7 @@ alias tm='tmux attach -t main || tmux new -s ai'
 alias ollamastatus='ollama ps'
 alias ollamamodels='ollama list'
 
-alias rt='echo "i2c-SYNA32A0:00" | sudo tee /sys/bus/i2c/drivers/i2c_hid_acpi/unbind && sleep 1 && echo "i2c-SYNA32A0:00" | sudo tee /sys/bus/i2c/drivers/i2c_hid_acpi/bind'
+alias rt="echo 'shrek' | sudo -S bash -c 'echo i2c-SYNA32A0:00 > /sys/bus/i2c/drivers/i2c_hid_acpi/unbind && sleep 1 && echo i2c-SYNA32A0:00 > /sys/bus/i2c/drivers/i2c_hid_acpi/bind'"
 alias ports='ss -tulpn'
 alias rb='source ~/.zshrc'
 alias myip='ip -4 addr show | grep -oP "(?<=inet\\s)\\d+(\\.\\d+){3}" | grep -v 127.0.0.1'
@@ -96,6 +96,11 @@ bindkey '\e[F'  end-of-line
 bindkey '\e[1~' beginning-of-line
 bindkey '\e[4~' end-of-line
 
+bindkey '\e[1;5D' backward-word       # Ctrl+Left
+bindkey '\e[1;5C' forward-word        # Ctrl+Right
+bindkey '\e[3;5~' kill-word           # Ctrl+Delete
+bindkey '\e[8;5~' backward-kill-word  # Ctrl+Backspace
+
 # thefuck alias
 eval $(thefuck --alias)
 
@@ -106,6 +111,53 @@ alias cd="z"
 # ---- Zsh plugins ----
 source ~/.zsh/zsh-autosuggestions/zsh-autosuggestions.zsh
 source ~/.zsh/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh
+
+# ---- Clipboard helpers (tmux-based) ----
+# Adjust PROMPT_CHAR if your prompt uses a different character (e.g. "$" or "%").
+# The default works for Powerlevel10k where each prompt line contains "❯ ".
+PROMPT_CHAR='❯ '
+
+# Copy the most recent command block (starting at the prompt line,
+# ending before the next top‑border line).
+cl() {
+  [[ -z "$TMUX" ]] && { echo "Not in a tmux session"; return 1; }
+  tmux capture-pane -pS -2000 |
+    awk -v p="$PROMPT_CHAR" '
+      { lines[NR] = $0 }
+      $0 ~ p { prompts[++pc] = NR }
+      END {
+        if (pc < 2) { print "Not enough command history" > "/dev/stderr"; exit }
+        start = prompts[pc-1]            # prompt line of the command we want
+        end   = prompts[pc] - 2          # line before the next top‑border line
+        if (end < start) end = start    # safety: always print at least the prompt line
+        for (i = start; i <= end; i++) print lines[i]
+      }
+    ' | wl-copy
+  echo "Last command (with output) copied to clipboard"
+}
+
+# Copy the last N command blocks (starting at each prompt line,
+# ending before the next top‑border line).
+cln() {
+  [[ -z "$TMUX" ]] && { echo "Not in a tmux session"; return 1; }
+  local n=${1:-1}
+  tmux capture-pane -pS -2000 |
+    awk -v p="$PROMPT_CHAR" -v N=$n '
+      { lines[NR] = $0 }
+      $0 ~ p { prompts[++pc] = NR }
+      END {
+        if (pc < 2) { print "Not enough command history" > "/dev/stderr"; exit }
+        total = pc - 1                     # exclude the helper'\''s own prompt
+        start_idx = total - N + 1
+        if (start_idx < 1) start_idx = 1
+        start = prompts[start_idx]          # first prompt we want
+        end   = prompts[pc] - 2            # line before the next top‑border line
+        if (end < start) end = start
+        for (i = start; i <= end; i++) print lines[i]
+      }
+    ' | wl-copy
+  echo "Last $n command block(s) copied to clipboard"
+}
 
 # ---- Auto-start fbterm on TTY ----
 if [ "$(tty | head -c 8)" = "/dev/tty" ]; then
