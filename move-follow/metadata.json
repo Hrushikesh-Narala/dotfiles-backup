@@ -1,0 +1,9 @@
+{
+  "KPlugin": {
+    "Id": "movefollow",
+    "Name": "Move Follow Desktop",
+    "Version": "1.0"
+  },
+  "X-Plasma-API": "javascript",
+  "KPackageStructure": "KWin/Script"
+}
