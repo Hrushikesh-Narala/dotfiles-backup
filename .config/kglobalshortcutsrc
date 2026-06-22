@@ -266,7 +266,7 @@ powerProfile=Battery\tMeta+B,Battery\tMeta+B,Switch Power Profile
 
 [plasmashell]
 Slideshow Wallpaper Next Image=,,Next Wallpaper Image
-_k_friendly_name=System Settings
+_k_friendly_name=plasmashell
 activate application launcher=Meta,Meta\tAlt+F1,Activate Application Launcher
 activate task manager entry 1=Meta+1,Meta+1,Activate Task Manager Entry 1
 activate task manager entry 10=,,Activate Task Manager Entry 10

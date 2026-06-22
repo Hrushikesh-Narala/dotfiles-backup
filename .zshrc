@@ -21,15 +21,15 @@ export PATH=/home/alienx/.opencode/bin:$PATH
 # Aliases
 alias oc='opencode'
 alias gui='sudo systemctl isolate graphical.target && sudo chvt 1'
-alias ttyonly='sudo systemctl isolate multi-user.target && sudo chvt 2'
+alias ttyon='sudo systemctl isolate multi-user.target && sudo chvt 2'
 alias rgui='sudo systemctl set-default graphical.target && sudo reboot'
 alias rtty='sudo systemctl set-default multi-user.target && sudo reboot'
-alias tm='tmux attach -t main || tmux new -s ai'
-alias ollamastatus='ollama ps'
-alias ollamamodels='ollama list'
+alias tm='tmux attach -t main'
 
 alias rt="echo 'shrek' | sudo -S bash -c 'echo i2c-SYNA32A0:00 > /sys/bus/i2c/drivers/i2c_hid_acpi/unbind && sleep 1 && echo i2c-SYNA32A0:00 > /sys/bus/i2c/drivers/i2c_hid_acpi/bind'"
 alias ports='ss -tulpn'
+alias soff='screenoff'
+alias son='screenon'
 alias rb='source ~/.zshrc'
 alias myip='ip -4 addr show | grep -oP "(?<=inet\\s)\\d+(\\.\\d+){3}" | grep -v 127.0.0.1'
 alias ram='free -h'

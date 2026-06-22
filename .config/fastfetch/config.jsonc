@@ -4,20 +4,20 @@
     "type": "file",
     "source": "~/.config/fastfetch/nobara-purple.txt",
     "color": {
-      "1": "#6B21A8"
-    }
+      "1": "#6B21A8",
+    },
   },
   "display": {
     "key": {
-      "type": "both"
+      "type": "both",
     },
     "separator": "  ",
     "color": {
       "keys": "#00ff41",
       "title": "#ff003c",
       "output": "#c0c0c0",
-      "separator": "#006600"
-    }
+      "separator": "#006600",
+    },
   },
   "modules": [
     { "type": "title", "keyColor": "#ff003c" },
@@ -47,6 +47,6 @@
     { "type": "poweradapter", "keyColor": "#00ff41" },
     { "type": "locale", "keyColor": "#00ff41" },
     "break",
-    "colors"
-  ]
+    "colors",
+  ],
 }
