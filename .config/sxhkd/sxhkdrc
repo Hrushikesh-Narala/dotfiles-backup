@@ -1,0 +1,2 @@
+super + F12
+    echo "shrek" | sudo -S bash -c 'echo i2c-SYNA32A0:00 > /sys/bus/i2c/drivers/i2c_hid_acpi/unbind && sleep 1 && echo i2c-SYNA32A0:00 > /sys/bus/i2c/drivers/i2c_hid_acpi/bind' && notify-send "Touchpad" "Restarted"

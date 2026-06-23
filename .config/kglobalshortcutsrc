@@ -284,6 +284,8 @@ activate task manager entry 7=Meta+7,Meta+7,Activate Task Manager Entry 7
 activate task manager entry 8=Meta+8,Meta+8,Activate Task Manager Entry 8
 activate task manager entry 9=Meta+9,Meta+9,Activate Task Manager Entry 9
 activate widget 155=Meta+A,none,Activate Networks Widget
+activate widget 158=Meta+F2,none,Activate Audio Volume Widget
+activate widget 165=Meta+F1,none,Activate Bluetooth Widget
 activate widget 221=,none,Activate Icons-Only Task Manager Widget
 clear-history=,,Clear Clipboard History
 clipboard_action=Meta+Ctrl+X,Meta+Ctrl+X,Automatic Action Popup Menu
@@ -302,8 +304,11 @@ switch to next activity=,,Switch to Next Activity
 switch to previous activity=,,Switch to Previous Activity
 toggle do not disturb=Meta+N,,Toggle do not disturb
 
+[services][kitty.desktop]
+_launch=Meta+Return
+
 [services][org.kde.konsole.desktop]
-_launch=none
+_launch=Ctrl+Alt+T
 
 [services][org.kde.krunner.desktop]
 _launch=Search\tAlt+Space
