@@ -3,7 +3,7 @@ Id_1=6181c4db-35fa-45a8-abd1-9126da249290
 Id_2=d1b224b3-f7ef-46f4-aebe-677133e9e72d
 Id_3=52e8102d-f0a2-426b-b202-fd222c841a14
 Id_4=a1b35246-9998-4259-9018-261beb0d928f
-Id_5=75a7c188-f3e3-473a-8f90-820b16cc3e19
+Id_5=ea526785-f8d3-41ec-a203-7f823bdf5f86
 Number=5
 Rows=1
 
@@ -29,10 +29,17 @@ CommandTitlebarWheel=Change Opacity
 [Plugins]
 desktop-managerEnabled=true
 desktopchangeosdEnabled=true
+diminactiveEnabled=true
+gestureswitchEnabled=true
 magiclampEnabled=true
+mousemarkEnabled=true
 movefollowEnabled=true
+slidebackEnabled=true
 squashEnabled=false
 synchronizeskipswitcherEnabled=true
+testscriptEnabled=true
+translucencyEnabled=true
+wobblywindowsEnabled=true
 
 [ScreenEdges]
 RemainActiveOnFullscreen=true
@@ -78,6 +85,13 @@ tiles={"layoutDirection":"horizontal","tiles":[{"width":0.25},{"width":0.5},{"wi
 [Tiling][ea42594b-812d-4eee-ae7d-1c29b15ce414][6aabcc33-2260-49cf-9d6b-69b9a76f89f6]
 padding=4
 tiles={"layoutDirection":"horizontal","tiles":[{"width":0.25},{"width":0.5},{"width":0.25}]}
+
+[Tiling][ea526785-f8d3-41ec-a203-7f823bdf5f86][6aabcc33-2260-49cf-9d6b-69b9a76f89f6]
+padding=4
+tiles={"layoutDirection":"horizontal","tiles":[{"width":0.25},{"width":0.5},{"width":0.25}]}
+
+[Wayland]
+InputMethod[$d]
 
 [Windows]
 ElectricBorderCooldown=50

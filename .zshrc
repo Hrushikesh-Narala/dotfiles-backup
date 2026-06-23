@@ -26,7 +26,8 @@ alias rgui='sudo systemctl set-default graphical.target && sudo reboot'
 alias rtty='sudo systemctl set-default multi-user.target && sudo reboot'
 alias tm='tmux attach -t main'
 
-alias rt="echo 'shrek' | sudo -S bash -c 'echo i2c-SYNA32A0:00 > /sys/bus/i2c/drivers/i2c_hid_acpi/unbind && sleep 1 && echo i2c-SYNA32A0:00 > /sys/bus/i2c/drivers/i2c_hid_acpi/bind'"
+
+alias rt='echo "shrek" | sudo -S bash -c '\''echo i2c-SYNA32A0:00 > /sys/bus/i2c/drivers/i2c_hid_acpi/unbind && sleep 1 && echo i2c-SYNA32A0:00 > /sys/bus/i2c/drivers/i2c_hid_acpi/bind'\'' && echo OK'
 alias ports='ss -tulpn'
 alias soff='screenoff'
 alias son='screenon'
@@ -99,7 +100,18 @@ bindkey '\e[4~' end-of-line
 bindkey '\e[1;5D' backward-word       # Ctrl+Left
 bindkey '\e[1;5C' forward-word        # Ctrl+Right
 bindkey '\e[3;5~' kill-word           # Ctrl+Delete
-bindkey '\e[8;5~' backward-kill-word  # Ctrl+Backspace
+# Ctrl+Backspace is handled by zsh's built-in Ctrl+W binding
+
+# Word selection (set mark + move)
+select-backward-word() { zle set-mark-command; zle backward-word }
+select-forward-word()  { zle set-mark-command; zle forward-word }
+zle -N select-backward-word
+zle -N select-forward-word
+bindkey '\e[1;6D' select-backward-word  # Ctrl+Shift+Left
+bindkey '\e[1;6C' select-forward-word   # Ctrl+Shift+Right
+
+# Shift+Enter: kitty sends \e\r (ESC+CR = ^[^M)
+# Handled by zsh's built-in: ^[^M → self-insert-unmeta (same as Alt+Enter)
 
 # thefuck alias
 eval $(thefuck --alias)
