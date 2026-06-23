@@ -143,12 +143,12 @@ TestShortcut=none,none,Test Shortcut
 Toggle Night Color=none,none,Suspend/Resume Night Light
 Toggle Window Raise/Lower=,,Toggle Window Raise/Lower
 ToggleCurrentThumbnail=Meta+Ctrl+T,Meta+Ctrl+T,Toggle Thumbnail for Current Window
-Walk Through Windows=Meta+Tab\tAlt+Tab,Meta+Tab\tAlt+Tab,Walk Through Windows
-Walk Through Windows (Reverse)=Meta+Shift+Tab\tAlt+Shift+Tab,Meta+Shift+Tab\tAlt+Shift+Tab,Walk Through Windows (Reverse)
+Walk Through Windows=Alt+Tab\t,Meta+Tab\tAlt+Tab,Walk Through Windows
+Walk Through Windows (Reverse)=Meta+Tab\t,Meta+Shift+Tab\tAlt+Shift+Tab,Walk Through Windows (Reverse)
 Walk Through Windows Alternative=none,none,Walk Through Windows Alternative
 Walk Through Windows Alternative (Reverse)=none,none,Walk Through Windows Alternative (Reverse)
-Walk Through Windows of Current Application=Meta+`\tAlt+`,Meta+`\tAlt+`,Walk Through Windows of Current Application
-Walk Through Windows of Current Application (Reverse)=Meta+~\tAlt+~,Meta+~\tAlt+~,Walk Through Windows of Current Application (Reverse)
+Walk Through Windows of Current Application=Meta+`\t,Meta+`\tAlt+`,Walk Through Windows of Current Application
+Walk Through Windows of Current Application (Reverse)=Alt+`\t,Meta+~\tAlt+~,Walk Through Windows of Current Application (Reverse)
 Walk Through Windows of Current Application Alternative=none,none,Walk Through Windows of Current Application Alternative
 Walk Through Windows of Current Application Alternative (Reverse)=none,none,Walk Through Windows of Current Application Alternative (Reverse)
 Window Above Other Windows=,,Keep Window Above Others
@@ -232,7 +232,7 @@ Window to Screen 4=,,Move Window to Screen 4
 Window to Screen 5=,,Move Window to Screen 5
 Window to Screen 6=,,Move Window to Screen 6
 Window to Screen 7=,,Move Window to Screen 7
-_k_friendly_name=KWin
+_k_friendly_name=System Settings
 disableInputCapture=Meta+Shift+Esc,Meta+Shift+Esc,Disable Active Input Capture
 view_actual_size=Meta+0,Meta+0,Zoom to Actual Size
 view_zoom_in=Meta++\tMeta+=,Meta++\tMeta+=,Zoom In
@@ -271,7 +271,7 @@ powerProfile=Battery\tMeta+B,Battery\tMeta+B,Switch Power Profile
 
 [plasmashell]
 Slideshow Wallpaper Next Image=,,Next Wallpaper Image
-_k_friendly_name=plasmashell
+_k_friendly_name=System Settings
 activate application launcher=Meta,Meta\tAlt+F1,Activate Application Launcher
 activate task manager entry 1=Meta+1,Meta+1,Activate Task Manager Entry 1
 activate task manager entry 10=,,Activate Task Manager Entry 10
@@ -284,6 +284,7 @@ activate task manager entry 7=Meta+7,Meta+7,Activate Task Manager Entry 7
 activate task manager entry 8=Meta+8,Meta+8,Activate Task Manager Entry 8
 activate task manager entry 9=Meta+9,Meta+9,Activate Task Manager Entry 9
 activate widget 155=Meta+A,none,Activate Networks Widget
+activate widget 156=Meta+N,none,Activate Notifications Widget
 activate widget 158=Meta+F2,none,Activate Audio Volume Widget
 activate widget 165=Meta+F1,none,Activate Bluetooth Widget
 activate widget 221=,none,Activate Icons-Only Task Manager Widget
@@ -302,7 +303,7 @@ show-barcode=,,Show Barcode…
 show-on-mouse-pos=Meta+V,Meta+V,Show Clipboard Items at Mouse Position
 switch to next activity=,,Switch to Next Activity
 switch to previous activity=,,Switch to Previous Activity
-toggle do not disturb=Meta+N,,Toggle do not disturb
+toggle do not disturb=Meta+F3,,Toggle do not disturb
 
 [services][kitty.desktop]
 _launch=Meta+Return
@@ -312,3 +313,7 @@ _launch=Ctrl+Alt+T
 
 [services][org.kde.krunner.desktop]
 _launch=Search\tAlt+Space
+
+[services][org.kde.spectacle.desktop]
+CurrentMonitorScreenShot=
+OpenWithoutScreenshot=

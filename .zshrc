@@ -1,5 +1,5 @@
-# Show system info with Nobara logo on terminal start
-fastfetch
+# Show system info with Nobara logo on terminal start (skip in tmux for speed)
+[[ -z "$TMUX" ]] && fastfetch
 
 # Enable Powerlevel10k instant prompt. Should stay close to the top of ~/.zshrc.
 # Initialization code that may require console input (password prompts, [y/n]
@@ -132,9 +132,30 @@ eval $(thefuck --alias)
 eval "$(zoxide init zsh)"
 alias cd="z"
 
+# ---- Completion system ----
+fpath=(~/.zsh/zsh-completions/src $fpath)
+autoload -Uz compinit
+if [[ ! -f "${ZDOTDIR:-$HOME}/.zcompdump" ]]; then
+  compinit
+else
+  compinit -C
+fi
+
 # ---- Zsh plugins ----
-source ~/.zsh/zsh-autosuggestions/zsh-autosuggestions.zsh
 source ~/.zsh/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh
+source ~/.zsh/zsh-autosuggestions/zsh-autosuggestions.zsh
+
+# ---- Flag highlighting ----
+ZSH_HIGHLIGHT_STYLES[single-hyphen-option]='fg=cyan'
+ZSH_HIGHLIGHT_STYLES[double-hyphen-option]='fg=cyan'
+
+# ---- you-should-use (alias reminders) ----
+source ~/.zsh/zsh-you-should-use/you-should-use.plugin.zsh
+
+# ---- history-substring-search (type prefix + up/down to search) ----
+source ~/.zsh/zsh-history-substring-search/zsh-history-substring-search.zsh
+bindkey '\e[A' history-substring-search-up
+bindkey '\e[B' history-substring-search-down
 
 # ---- Clipboard helpers (tmux-based) ----
 # Adjust PROMPT_CHAR if your prompt uses a different character (e.g. "$" or "%").
