@@ -9,13 +9,13 @@ Rows=1
 
 [EdgeBarrier]
 CornerBarrier=false
-EdgeBarrier=0
+EdgeBarrier=1
 
 [Effect-overview]
 BorderActivate=9
 
 [Effect-windowview]
-BorderActivateAll=2,7
+BorderActivateAll=2,3
 TouchBorderActivateAll=0
 
 [ModifierOnlyShortcuts]
@@ -90,13 +90,10 @@ tiles={"layoutDirection":"horizontal","tiles":[{"width":0.25},{"width":0.5},{"wi
 padding=4
 tiles={"layoutDirection":"horizontal","tiles":[{"width":0.25},{"width":0.5},{"width":0.25}]}
 
-[Wayland]
-InputMethod[$d]
-
 [Windows]
-ElectricBorderCooldown=50
+ElectricBorderCooldown=150
 ElectricBorderCornerRatio=0.01
-ElectricBorderDelay=0
+ElectricBorderDelay=10
 FocusPolicy=FocusFollowsMouse
 NextFocusPrefersMouse=true
 

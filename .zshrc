@@ -15,6 +15,18 @@ if ! [[ "$PATH" =~ "$HOME/.local/bin:$HOME/bin:" ]]; then
 fi
 export PATH
 
+# ---- History configuration (shared across all zsh sessions) ----
+HISTFILE="$HOME/.zsh_history"
+HISTSIZE=100000
+SAVEHIST=100000
+
+setopt SHARE_HISTORY
+setopt APPEND_HISTORY
+setopt INC_APPEND_HISTORY
+setopt EXTENDED_HISTORY
+setopt HIST_IGNORE_ALL_DUPS
+setopt HIST_FIND_NO_DUPS
+
 # opencode
 export PATH=/home/alienx/.opencode/bin:$PATH
 
@@ -26,7 +38,7 @@ alias rgui='sudo systemctl set-default graphical.target && sudo reboot'
 alias rtty='sudo systemctl set-default multi-user.target && sudo reboot'
 alias tm='tmux attach -t main'
 
-
+alias nv='nvim'
 alias rt='echo "shrek" | sudo -S bash -c '\''echo i2c-SYNA32A0:00 > /sys/bus/i2c/drivers/i2c_hid_acpi/unbind && sleep 1 && echo i2c-SYNA32A0:00 > /sys/bus/i2c/drivers/i2c_hid_acpi/bind'\'' && echo OK'
 alias ports='ss -tulpn'
 alias soff='screenoff'
