@@ -232,7 +232,7 @@ Window to Screen 4=,,Move Window to Screen 4
 Window to Screen 5=,,Move Window to Screen 5
 Window to Screen 6=,,Move Window to Screen 6
 Window to Screen 7=,,Move Window to Screen 7
-_k_friendly_name=System Settings
+_k_friendly_name=KWin
 disableInputCapture=Meta+Shift+Esc,Meta+Shift+Esc,Disable Active Input Capture
 view_actual_size=Meta+0,Meta+0,Zoom to Actual Size
 view_zoom_in=Meta++\tMeta+=,Meta++\tMeta+=,Zoom In
@@ -271,7 +271,7 @@ powerProfile=Battery\tMeta+B,Battery\tMeta+B,Switch Power Profile
 
 [plasmashell]
 Slideshow Wallpaper Next Image=,,Next Wallpaper Image
-_k_friendly_name=System Settings
+_k_friendly_name=plasmashell
 activate application launcher=Meta,Meta\tAlt+F1,Activate Application Launcher
 activate task manager entry 1=Meta+1,Meta+1,Activate Task Manager Entry 1
 activate task manager entry 10=,,Activate Task Manager Entry 10
@@ -313,7 +313,3 @@ _launch=Ctrl+Alt+T
 
 [services][org.kde.krunner.desktop]
 _launch=Search\tAlt+Space
-
-[services][org.kde.spectacle.desktop]
-CurrentMonitorScreenShot=
-OpenWithoutScreenshot=
