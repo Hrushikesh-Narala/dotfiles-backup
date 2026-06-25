@@ -66,7 +66,15 @@ tiles={"layoutDirection":"horizontal","tiles":[{"width":0.25},{"width":0.5},{"wi
 padding=4
 tiles={"layoutDirection":"horizontal","tiles":[{"width":0.25},{"width":0.5},{"width":0.25}]}
 
+[Tiling][52e8102d-f0a2-426b-b202-fd222c841a14][77739df6-b5d4-4640-9469-cbb1871c4312]
+padding=4
+tiles={"layoutDirection":"horizontal","tiles":[{"width":0.25},{"width":0.5},{"width":0.25}]}
+
 [Tiling][6181c4db-35fa-45a8-abd1-9126da249290][6aabcc33-2260-49cf-9d6b-69b9a76f89f6]
+padding=4
+tiles={"layoutDirection":"horizontal","tiles":[{"width":0.25},{"width":0.5},{"width":0.25}]}
+
+[Tiling][6181c4db-35fa-45a8-abd1-9126da249290][77739df6-b5d4-4640-9469-cbb1871c4312]
 padding=4
 tiles={"layoutDirection":"horizontal","tiles":[{"width":0.25},{"width":0.5},{"width":0.25}]}
 
@@ -78,7 +86,15 @@ tiles={"layoutDirection":"horizontal","tiles":[{"width":0.25},{"width":0.5},{"wi
 padding=4
 tiles={"layoutDirection":"horizontal","tiles":[{"width":0.25},{"width":0.5},{"width":0.25}]}
 
+[Tiling][a1b35246-9998-4259-9018-261beb0d928f][77739df6-b5d4-4640-9469-cbb1871c4312]
+padding=4
+tiles={"layoutDirection":"horizontal","tiles":[{"width":0.25},{"width":0.5},{"width":0.25}]}
+
 [Tiling][d1b224b3-f7ef-46f4-aebe-677133e9e72d][6aabcc33-2260-49cf-9d6b-69b9a76f89f6]
+padding=4
+tiles={"layoutDirection":"horizontal","tiles":[{"width":0.25},{"width":0.5},{"width":0.25}]}
+
+[Tiling][d1b224b3-f7ef-46f4-aebe-677133e9e72d][77739df6-b5d4-4640-9469-cbb1871c4312]
 padding=4
 tiles={"layoutDirection":"horizontal","tiles":[{"width":0.25},{"width":0.5},{"width":0.25}]}
 
@@ -90,12 +106,18 @@ tiles={"layoutDirection":"horizontal","tiles":[{"width":0.25},{"width":0.5},{"wi
 padding=4
 tiles={"layoutDirection":"horizontal","tiles":[{"width":0.25},{"width":0.5},{"width":0.25}]}
 
+[Tiling][ea526785-f8d3-41ec-a203-7f823bdf5f86][77739df6-b5d4-4640-9469-cbb1871c4312]
+padding=4
+tiles={"layoutDirection":"horizontal","tiles":[{"width":0.25},{"width":0.5},{"width":0.25}]}
+
+[Wayland]
+InputMethod[$d]
+VirtualKeyboardEnabled=false
+
 [Windows]
 ElectricBorderCooldown=150
 ElectricBorderCornerRatio=0.01
 ElectricBorderDelay=10
-FocusPolicy=FocusFollowsMouse
-NextFocusPrefersMouse=true
 
 [Xwayland]
 Scale=1.25

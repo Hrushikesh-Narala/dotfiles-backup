@@ -1,5 +1,6 @@
 [ActivityManager]
 _k_friendly_name=Activity Manager
+switch-to-activity-1ae57b5c-03ba-4172-b7bf-7730d76ee5b2=none,none,Switch to activity "Default"
 switch-to-activity-c4906031-0de9-45b7-a89b-9ab4ddd9463c=none,none,Switch to activity "Default"
 
 [KDE Keyboard Layout Switcher]
@@ -308,8 +309,9 @@ toggle do not disturb=Meta+F3,,Toggle do not disturb
 [services][kitty.desktop]
 _launch=Meta+Return
 
-[services][org.kde.konsole.desktop]
-_launch=Ctrl+Alt+T
-
 [services][org.kde.krunner.desktop]
 _launch=Search\tAlt+Space
+
+[services][org.kde.spectacle.desktop]
+CurrentMonitorScreenShot=
+OpenWithoutScreenshot=

@@ -381,6 +381,29 @@ The `@sessionx-fzf-builtin-tmux` option is left at its default (`off`) since `fz
 
 `~/.config/tmux/scripts/transparent-status.sh` runs after TPM loads. It strips hardcoded background colors from the Catppuccin theme and sets all status elements to `bg=default`, making the tmux status bar transparent. This allows the kitty terminal's background image to show through.
 
+### Catppuccin Selected Window Tab Transparency Fix
+
+**Symptom**: The selected window tab's text background was transparent instead of solid, making it hard to read.
+
+**Root cause** (two things interacting):
+1. Catppuccin plugin sets the current window background to `$thm_bg` (the terminal's base background color — `#1e1e2e` for Mocha)
+2. The `transparent-status.sh` script replaces all `bg=#1e1e2e` with `bg=default` to make the status bar transparent — which also hits the selected tab's text area
+
+**Fix**: Changed one line in `~/.tmux/plugins/catppuccin-tmux/window/window_current_format.sh`:
+
+```diff
+-  local background="$thm_bg"
++  local background="$thm_gray"
+```
+
+This uses `$thm_gray` (`#313244`) for the selected tab's text background — the same solid gray as non-selected tabs — so the transparent script doesn't touch it. Only the number badge still changes color (to orange).
+
+**Note**: This fix lives in a TPM-managed plugin file that gets overwritten on plugin update. To make it persistent without re-patching, add a post-processing line in `transparent-status.sh`:
+
+```sh
+tmux set-option -g window-status-current-format "$(tmux show-option -gv window-status-current-format | sed 's/bg=#1e1e2e/bg=#313244/g')"
+```
+
 ---
 
 ## Keyboard: Keyd
