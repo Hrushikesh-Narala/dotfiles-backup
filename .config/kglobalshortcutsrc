@@ -284,18 +284,24 @@ activate task manager entry 6=Meta+6,Meta+6,Activate Task Manager Entry 6
 activate task manager entry 7=Meta+7,Meta+7,Activate Task Manager Entry 7
 activate task manager entry 8=Meta+8,Meta+8,Activate Task Manager Entry 8
 activate task manager entry 9=Meta+9,Meta+9,Activate Task Manager Entry 9
-activate widget 155=Meta+A,none,Activate Networks Widget
-activate widget 156=Meta+N,none,Activate Notifications Widget
-activate widget 158=Meta+F2,none,Activate Audio Volume Widget
-activate widget 165=Meta+F1,none,Activate Bluetooth Widget
+activate widget 155=,none,Activate Networks Widget
+activate widget 156=,none,Activate Notifications Widget
+activate widget 158=,none,Activate Audio Volume Widget
+activate widget 165=,none,Activate Bluetooth Widget
 activate widget 221=,none,Activate Icons-Only Task Manager Widget
+activate widget 45=Meta+A,none,Activate Networks Widget
+activate widget 46=Meta+N,none,Activate Notifications Widget
+activate widget 48=Meta+F1,none,Activate Audio Volume Widget
+activate widget 55=Meta+F2,none,Activate Bluetooth Widget
+activate widget 66=,none,Activate Application Menu Widget
+activate widget 73=,none,Activate Spacer with Divider Widget
 clear-history=,,Clear Clipboard History
 clipboard_action=Meta+Ctrl+X,Meta+Ctrl+X,Automatic Action Popup Menu
 cycle-panels=Meta+Alt+P,Meta+Alt+P,Move keyboard focus between panels
 cycleNextAction=,,Next History Item
 cyclePrevAction=,,Previous History Item
 edit_clipboard=,,Edit Contents…
-manage activities=Meta+Q,Meta+Q,Show Activity Switcher
+manage activities=,Meta+Q,Show Activity Switcher
 next activity=,none,Walk through activities
 previous activity=Meta+Shift+A,none,Walk through activities (Reverse)
 repeat_action=,,Manually Invoke Action on Current Clipboard
@@ -305,6 +311,9 @@ show-on-mouse-pos=Meta+V,Meta+V,Show Clipboard Items at Mouse Position
 switch to next activity=,,Switch to Next Activity
 switch to previous activity=,,Switch to Previous Activity
 toggle do not disturb=Meta+F3,,Toggle do not disturb
+
+[services][io.github.tanaybhomia.Whisp.desktop]
+_launch=Meta+Q
 
 [services][kitty.desktop]
 _launch=Meta+Return

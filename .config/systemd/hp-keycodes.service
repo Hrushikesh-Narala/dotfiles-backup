@@ -1,0 +1,10 @@
+[Unit]
+Description=HP setkeycodes fix
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/setkeycodes e057 240 e058 240
+
+[Install]
+WantedBy=multi-user.target
+WantedBy=graphical.target

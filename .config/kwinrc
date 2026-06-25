@@ -34,11 +34,11 @@ gestureswitchEnabled=true
 magiclampEnabled=true
 mousemarkEnabled=true
 movefollowEnabled=true
-slidebackEnabled=true
 squashEnabled=false
 synchronizeskipswitcherEnabled=true
 testscriptEnabled=true
 translucencyEnabled=true
+virtualdesktopsonlyonprimaryEnabled=true
 wobblywindowsEnabled=true
 
 [ScreenEdges]
@@ -111,7 +111,6 @@ padding=4
 tiles={"layoutDirection":"horizontal","tiles":[{"width":0.25},{"width":0.5},{"width":0.25}]}
 
 [Wayland]
-InputMethod[$d]
 VirtualKeyboardEnabled=false
 
 [Windows]

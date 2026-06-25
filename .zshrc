@@ -14,7 +14,7 @@ if ! [[ "$PATH" =~ "$HOME/.local/bin:$HOME/bin:" ]]; then
     PATH="$HOME/.local/bin:$HOME/bin:$PATH"
 fi
 export PATH
-
+export SUDO_EDITOR="nvim"
 # ---- History configuration (shared across all zsh sessions) ----
 HISTFILE="$HOME/.zsh_history"
 HISTSIZE=100000
