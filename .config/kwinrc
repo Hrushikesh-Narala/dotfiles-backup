@@ -15,7 +15,8 @@ EdgeBarrier=1
 BorderActivate=9
 
 [Effect-windowview]
-BorderActivateAll=2,3
+BorderActivate=2
+BorderActivateAll=3
 TouchBorderActivateAll=0
 
 [ModifierOnlyShortcuts]
@@ -49,6 +50,7 @@ PopupHideDelay=500
 TextOnly=true
 
 [TabBox]
+BorderAlternativeActivate=5,6
 LayoutName=thumbnail_grid
 
 [TabBoxAlternative]

@@ -25,7 +25,7 @@ decrease_volume_small=Shift+Volume Down,Shift+Volume Down,Decrease Volume by 1%
 increase_microphone_volume=Microphone Volume Up,Microphone Volume Up,Increase Microphone Volume
 increase_volume=Volume Up,Volume Up,Increase Volume
 increase_volume_small=Shift+Volume Up,Shift+Volume Up,Increase Volume by 1%
-mic_mute=Microphone Mute\tMeta+F8,Microphone Mute\tMeta+Volume Mute,Mute Microphone
+mic_mute=Meta+F8\tMeta+Volume Mute\tMicrophone Mute,Microphone Mute\tMeta+Volume Mute,Mute Microphone
 mute=Volume Mute,Volume Mute,Mute
 
 [ksmserver]
@@ -293,8 +293,8 @@ activate widget 45=Meta+A,none,Activate Networks Widget
 activate widget 46=Meta+N,none,Activate Notifications Widget
 activate widget 48=Meta+F1,none,Activate Audio Volume Widget
 activate widget 55=Meta+F2,none,Activate Bluetooth Widget
-activate widget 66=,none,Activate Application Menu Widget
 activate widget 73=,none,Activate Spacer with Divider Widget
+activate widget 76=,none,Activate Application Launcher Widget
 clear-history=,,Clear Clipboard History
 clipboard_action=Meta+Ctrl+X,Meta+Ctrl+X,Automatic Action Popup Menu
 cycle-panels=Meta+Alt+P,Meta+Alt+P,Move keyboard focus between panels
