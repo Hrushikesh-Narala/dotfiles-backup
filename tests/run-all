@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# run-all - execute every verification script and summarise.
+#
+# All of these write to the EC, so they all need root. They restore the firmware
+# temperature curve on exit, including on Ctrl-C, but run them one at a time
+# rather than in parallel: they share one fan.
+
+set -uo pipefail
+HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+
+[ "$(id -u)" = 0 ] || { echo "run-all: must be root (these write /dev/mem)" >&2; exit 1; }
+
+pass=0; fail=0
+for t in fanlatch fantail; do
+  echo
+  echo "############################################################"
+  echo "# $t"
+  echo "############################################################"
+  if bash "$HERE/$t"; then
+    echo "--> $t completed"
+    pass=$(( pass + 1 ))
+  else
+    echo "--> $t FAILED (exit $?)"
+    fail=$(( fail + 1 ))
+  fi
+  sleep 3
+done
+
+echo
+echo "############################################################"
+echo "# fansweep is interactive and destructive; skipped by default."
+echo "# Run it directly if you are re-deriving the FNSW mechanism:"
+echo "#     sudo $HERE/fansweep"
+echo "############################################################"
+
+echo
+echo "completed: $pass   failed: $fail"
+[ "$fail" -eq 0 ] || exit 1

@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+# fanrpm - live fan RPM / temperature monitor for the HP Envy x360 13-ay.
+#
+#   sudo fanrpm          live display, refreshes every second
+#   sudo fanrpm --once   single reading, for scripts and logs
+#
+# Read-only. Two independent fan readings are shown side by side:
+#   \_TZ.TSZ0.FRSP   fan RPM through the AML interface
+#   /dev/mem 0x811   the raw EC register the AML itself reads
+# Agreeing means we are looking at the real tachometer.
+
+BASE=$((0xFE0B0000))
+OFF=$((0x800))
+LEN=24
+K10=/sys/class/hwmon/hwmon6/temp1_input
+ACPI=/proc/acpi/call
+SPARK=(▁ ▂ ▃ ▄ ▅ ▆ ▇ █)
+HIST=()
+
+[ "$(id -u)" = 0 ] || { echo "fanrpm: must run as root (reads /dev/mem)" >&2; exit 1; }
+
+# The AML column is a nice cross-check but is optional: it needs acpi_call.ko,
+# which is not packaged and does not survive a reboot. The raw /dev/mem column
+# always works, so a missing module degrades the display instead of breaking it.
+HAVE_ACPI=0
+[ -r "$ACPI" ] && [ -w "$ACPI" ] && HAVE_ACPI=1
+
+amlv() {
+  [ "$HAVE_ACPI" = 1 ] || { echo -1; return; }
+  printf '%s\n' "$1" > "$ACPI" 2>/dev/null
+  local v; v=$(cat "$ACPI" 2>/dev/null | tr '\000' '\n' | head -n1 | tr -cd '[:print:]')
+  [[ $v =~ ^0x ]] && echo $(( v )) || echo -1
+}
+
+R=()
+rb() { echo "${R[$(( $1 - OFF ))]}"; }
+rd() { local v; v=$(rb "$1"); case $v in ''|*[!0-9a-fA-F]*) echo -1 ;; *) echo $(( 16#$v )) ;; esac; }
+
+ac_state() {
+  local p
+  for p in /sys/class/power_supply/AC*/online; do
+    [ -r "$p" ] && [ "$(cat "$p")" = 1 ] && { echo "AC / mains"; return; }
+  done
+  echo "DC / battery"
+}
+
+# one dd per cycle reads the whole fan register block from physical memory
+sample() {
+  mapfile -t R < <(dd if=/dev/mem bs=1 skip=$((BASE+OFF)) count=$LEN 2>/dev/null \
+                    | od -An -tx1 -v | tr -s ' ' '\n' | grep -v '^$')
+
+  local f
+  f=$(rd $((OFF+0x0F)))
+  FANE=$(( f & 1 )); FNSW=$(( (f >> 3) & 1 )); WPFM=$(( (f >> 6) & 1 ))
+  F_RPM_RAW=$(( $(rd $((OFF+0x11))) * 100 ))
+  F_MAX=$(( $(rd $((OFF+0x12))) * 100 ))
+  F_MIN=$(( $(rd $((OFF+0x13))) * 100 ))
+  F_TGT=$(rd $((OFF+0x14)))
+  F_CFG=$(rd $((OFF+0x08)))
+
+  F_RPM_AML=$(amlv '\_TZ.TSZ0.FRSP')
+  F_MAX_AML=$(amlv '\_TZ.TSZ0.FMAX')
+  F_MIN_AML=$(amlv '\_TZ.TSZ0.FMIN')
+
+  if [ -r "$K10" ]; then
+    F_TMP=$(awk -v m="$(cat "$K10")" 'BEGIN{printf "%.1f", m/1000}')
+  else
+    F_TMP="?"
+  fi
+  F_AC=$(ac_state)
+  F_RPM=$F_RPM_AML
+  [ "$F_RPM" -lt 0 ] && F_RPM=$F_RPM_RAW
+
+  HIST+=("$F_RPM")
+  [ "${#HIST[@]}" -gt 90 ] && HIST=("${HIST[@]:1}")
+  local m=${HIST[0]} v out="" i
+  for v in "${HIST[@]}"; do [ "$v" -gt "$m" ] && m=$v; done
+  [ "$m" -lt 1 ] && m=1
+  for v in "${HIST[@]}"; do
+    i=$(( v * 7 / m )); [ "$i" -gt 7 ] && i=7; [ "$i" -lt 0 ] && i=0
+    out+="${SPARK[$i]}"
+  done
+  F_SPARK="$out"
+}
+
+if [ "$1" = "--once" ]; then
+  sample
+  printf "  %-12s  fan %5d RPM  (AML %d / raw %d)  CPU %s C  target %d  range %d-%d RPM\n" \
+    "$F_AC" "$F_RPM" "$F_RPM_AML" "$F_RPM_RAW" "$F_TMP" "$F_TGT" "$F_MIN" "$F_MAX"
+  exit 0
+fi
+
+trap 'echo; exit 0' INT TERM
+while true; do
+  sample
+  printf '\033[H\033[2J'
+  printf '  HP Envy x360 13-ay  -  fan monitor          %s\n\n' "$(date '+%H:%M:%S')"
+  printf '  +--------------------------------------------------+\n'
+  printf '  |                                                  |\n'
+  printf '  |    FAN   %5d RPM                            |\n' "$F_RPM"
+  printf '  |    CPU   %5s C                              |\n' "$F_TMP"
+  printf '  |    PWR   %-30s |\n' "$F_AC"
+  printf '  |                                                  |\n'
+  printf '  +--------------------------------------------------+\n\n'
+  printf '  AML  FRSP / FMAX / FMIN : %d / %d / %d RPM\n' "$F_RPM_AML" "$F_MAX_AML" "$F_MIN_AML"
+  printf '  raw  0x811 / 0x812 / 0x813: %d / %d / %d RPM\n' "$F_RPM_RAW" "$F_MAX" "$F_MIN"
+  printf '  EC   target 0x814 FWPM  : %-5s (0 = firmware curve, non-zero = commanded)\n' "$F_TGT"
+  printf '  EC   config 0x808 PSPD  : %-5s   0x809 CSRT ramp: %s\n' "$F_CFG" "$(rd $((OFF+0x09)))"
+  printf '  EC   flags  0x80F       : FANE=%d FNSW=%d WPFM=%d\n' "$FANE" "$FNSW" "$WPFM"
+  printf '  \n  last %d samples\n  %s\n' "${#HIST[@]}" "$F_SPARK"
+  sleep 1
+done

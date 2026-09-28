@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+# fansweep - find the flag combination that makes the EC obey the fan target.
+#
+# Established so far: 0x814 (FWPM) accepts and retains writes, but the fan does
+# not change speed. That points at a mode bit, most likely WPFM (bit 6 of 0x80F,
+# "write PWM fan" = manual mode) which nothing has ever set.
+#
+# This sweeps every plausible combination. For each one it commands MAX (the safe
+# direction - a failed test leaves the fan slower, never faster than asked) and
+# samples the real tachometer, then restores the original state exactly.
+#
+# Original flags and target are captured up front and put back on exit, including
+# on Ctrl-C.
+
+set -u
+BASE=$((0xFE0B0000)); OFF=$((0x800))
+ACPI=/proc/acpi/call
+K10=/sys/class/hwmon/hwmon6/temp1_input
+
+[ "$(id -u)" = 0 ] || { echo "must be root" >&2; exit 1; }
+
+getb(){ local v; v=$(dd if=/dev/mem bs=1 skip=$((BASE+OFF+$1)) count=1 status=none 2>/dev/null|od -An -tx1 -v|tr -d ' \n')
+         case $v in ''|*[!0-9a-fA-F]*) echo -1 ;; *) echo $(( 16#$v )) ;; esac; }
+putb(){ printf "\\$(printf '%03o' "$2")" | dd of=/dev/mem bs=1 seek=$((BASE+OFF+$1)) conv=notrunc status=none; }
+rpm(){ printf '%s\n' '\_TZ.TSZ0.FRSP' > "$ACPI" 2>/dev/null
+       local v; v=$(cat "$ACPI" 2>/dev/null|tr '\000' '\n'|head -n1|tr -cd '[:print:]')
+       [[ $v =~ ^0x ]] && echo $(( v )) || echo -1; }
+cput(){ [ -r "$K10" ] && awk -v m="$(cat "$K10")" 'BEGIN{printf "%.1f",m/1000}' || echo "?"; }
+acst(){ local p; for p in /sys/class/power_supply/AC*/online; do
+          [ -r "$p" ] && [ "$(cat "$p")" = 1 ] && { echo "AC "; return; }; done; echo "DC "; }
+
+F_FLAGS=0x0F; F_TGT=0x14
+ORIG_FLAGS=$(getb $F_FLAGS); ORIG_TGT=$(getb $F_TGT)
+
+restore(){ putb $F_FLAGS "$ORIG_FLAGS"; putb $F_TGT "$ORIG_TGT"; }
+trap 'echo; echo "[interrupted - restoring original state]"; restore; exit 130' INT TERM
+trap 'restore' EXIT
+
+echo
+echo "=== original state ==="
+printf '  flags 0x80F = 0x%02X (FANE=%d FNSW=%d WPFM=%d)\n' "$ORIG_FLAGS" \
+  $((ORIG_FLAGS&1)) $(((ORIG_FLAGS>>3)&1)) $(((ORIG_FLAGS>>6)&1))
+printf '  target 0x814 = 0x%02X\n' "$ORIG_TGT"
+printf '  fan = %d RPM, CPU = %s C, power = %s\n' "$(rpm)" "$(cput)" "$(acst)"
+echo
+echo "  Testing with target = 59 (max, 5900 RPM). If a combination works, the"
+echo "  fan will rise. Failing tests leave the fan at or below where it was."
+echo
+
+try(){ # try <label> <flag-byte> <target>
+  local label=$1 flags=$2 tgt=$3 i peak=0 cur
+  putb $F_FLAGS "$flags"
+  putb $F_TGT "$tgt"
+  local rf rt; rf=$(getb $F_FLAGS); rt=$(getb $F_TGT)
+  for i in 1 2 3 4 5 6; do
+    cur=$(rpm); [ "$cur" -gt "$peak" ] 2>/dev/null && peak=$cur
+    sleep 1
+  done
+  printf '  %-34s flags=0x%02X(tgt 0x%02X)  peak %5d RPM   %s\n' \
+    "$label" "$rf" "$rt" "$peak" \
+    "$([ "$peak" -gt 4500 ] 2>/dev/null && echo '<<< FAN RESPONDED' || echo '-')"
+  restore
+  sleep 1
+}
+
+try "A FNSW only"                 $(( (ORIG_FLAGS | 0x08) ))                 59
+try "B WPFM only"                 $(( (ORIG_FLAGS | 0x40) ))                 59
+try "C FNSW+WPFM"                 $(( (ORIG_FLAGS | 0x48) ))                 59
+try "D FANE cleared +FNSW+WPFM"   $(( ((ORIG_FLAGS & ~0x01) | 0x48) & 0xFF )) 59
+try "E FNSW+WPFM, target 255"     $(( (ORIG_FLAGS | 0x48) ))                 255
+try "F FNSW+WPFM+FANE, target 0"  $(( (ORIG_FLAGS | 0x49) ))                 0
+try "G all flags, target 59"      $(( (ORIG_FLAGS | 0x7F) ))                 59
+
+echo
+echo "=== restored ==="
+printf '  flags 0x80F = 0x%02X   target 0x814 = 0x%02X   fan = %d RPM\n' \
+  "$(getb $F_FLAGS)" "$(getb $F_TGT)" "$(rpm)"

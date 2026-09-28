@@ -1,0 +1,235 @@
+#!/usr/bin/env bash
+# fanctl - fan profiles for the HP Envy x360 13-ay (board 8929, BIOS F.14)
+#
+# WHY THIS EXISTS
+#   The hp-wmi driver cannot control this board (absent from its feature table)
+#   and all 48 WMI GM commands (GC01-GC2F) are firmware stubs returning
+#   constants. So no WMI-based tool can work. The live interface is the EC
+#   register block at physical 0xFE0B0000, which the AML reaches but never
+#   uses for speed control.
+#
+# THE MECHANISM (verified by measurement, not assumption)
+#   0x80F bit 3 (FNSW) is the fan-target LATCH, not a write strobe. While FNSW
+#   is set, 0x814 (FWPM) is the active fan command; clearing FNSW hands the fan
+#   straight back to the firmware's own temperature curve.
+#     command:  set FNSW, write 0x814, LEAVE FNSW SET
+#     auto   :  clear FNSW
+#   An earlier version set and released FNSW around the write, after the fashion
+#   of the AML. That silently did nothing: the EC reverted the moment FNSW went
+#   low. Leaving it set is what actually works.
+#   0x814 is in units of 100 RPM: value 59 -> 5900 RPM (observed), 0 -> firmware.
+#   FANE and WPFM are NOT required; FNSW alone is sufficient.
+#
+#   CAUTION: 0x811 (FRPM) appears to report the commanded target rather than a
+#   true tachometer reading - commanding 255 reported 25500 RPM, which this fan
+#   cannot do. Treat the RPM figure as "what the EC is commanding".
+
+BASE=$((0xFE0B0000)); OFF=$((0x800))
+K10=/sys/class/hwmon/hwmon6/temp1_input
+GUARDPID=/run/fanctl.guard
+CONF=/etc/fanctl.conf
+GUARD_TEMP=85
+
+F_FLAGS=0x0F
+F_TGT=0x14
+F_MAXR=0x12
+F_MINR=0x13
+F_RPM=0x11
+FNSW_BIT=0x08
+
+declare -A PROFILE=( [silent]=12 [quiet]=20 [balanced]=30 [performance]=42 [max]=59 )
+declare -A PDESC=(
+  [silent]="barely audible, for cool workloads"
+  [quiet]="library and office work"
+  [balanced]="everyday default"
+  [performance]="sustained load"
+  [max]="firmware ceiling FNMX, loudest"
+)
+
+[ "$(id -u)" = 0 ] || { echo "fanctl: must run as root (writes /dev/mem)" >&2; exit 1; }
+# NOTE: this tool deliberately does NOT use the ACPI call interface. Reading the
+# AML needs acpi_call.ko, which is not packaged for this distro and does not
+# survive a reboot; depending on it would break fanctl after every update.
+# Everything here goes through /dev/mem instead, which needs nothing extra.
+
+getb(){ local v; v=$(dd if=/dev/mem bs=1 skip=$((BASE+OFF+$1)) count=1 status=none 2>/dev/null|od -An -tx1 -v|tr -d ' \n')
+         case $v in ''|*[!0-9a-fA-F]*) echo -1 ;; *) echo $(( 16#$v )) ;; esac; }
+putb(){ printf "\\$(printf '%03o' "$2")" | dd of=/dev/mem bs=1 seek=$((BASE+OFF+$1)) conv=notrunc status=none; }
+cput(){ [ -r "$K10" ] && awk -v m="$(cat "$K10")" 'BEGIN{printf "%.1f",m/1000}' || echo "?"; }
+rpm_now(){ getb $F_RPM; }   # 0x811, the same register the AML reads
+acst(){ local p; for p in /sys/class/power_supply/AC*/online; do
+          [ -r "$p" ] && [ "$(cat "$p")" = 1 ] && { echo AC; return; }; done; echo DC; }
+
+# command <units>: set FNSW, write target, LEAVE FNSW SET.
+#
+# FNSW is a latch, not a strobe. Releasing it after the write hands the fan
+# back to the firmware curve immediately, which is why an earlier set-then-
+# release version reported "write verified" and changed nothing. Other flag
+# bits are preserved so we never clobber a bit the EC manages itself.
+command_units(){
+  local u=$1 f got
+  f=$(getb $F_FLAGS)
+  putb $F_FLAGS $(( f | FNSW_BIT ))
+  putb $F_TGT "$u"
+  f=$(getb $F_FLAGS)
+  got=$(getb $F_TGT)
+  if [ $(( f & FNSW_BIT )) -eq 0 ]; then
+    echo "fanctl: FNSW would not latch - the EC will not hold a commanded speed." >&2
+    return 1
+  fi
+  [ "$got" = "$u" ] || { echo "fanctl: target write rejected (wanted $u, got $got)" >&2; return 1; }
+  return 0
+}
+
+# auto: drop FNSW so the firmware's own temperature curve resumes
+to_auto(){
+  local f; f=$(getb $F_FLAGS)
+  putb $F_FLAGS $(( f & ~FNSW_BIT ))
+  [ $(( $(getb $F_FLAGS) & FNSW_BIT )) -eq 0 ] || { echo "fanctl: could not clear FNSW" >&2; return 1; }
+  return 0
+}
+
+stop_guard(){ [ -f "$GUARDPID" ] && kill "$(cat "$GUARDPID")" 2>/dev/null; rm -f "$GUARDPID"; }
+start_guard(){
+  [ -f "$CONF" ] && . "$CONF" 2>/dev/null
+  [ -n "${GUARD_TEMP:-}" ] || GUARD_TEMP=85
+  stop_guard
+  ( while :; do
+      t=$(cput)
+      case $t in ''|*[!0-9.]*) ;; *)
+        if awk -v t="$t" -v l="$GUARD_TEMP" 'BEGIN{exit !(t>=l)}'; then
+          logger -t fanctl "thermal guard tripped at ${t}C - releasing fan to firmware curve"
+          "$0" auto >/dev/null 2>&1
+          exit 0
+        fi ;;
+    esac
+    sleep 2
+  done ) >/dev/null 2>&1 &
+  echo $! > "$GUARDPID"
+}
+
+show(){
+  local f; f=$(getb $F_FLAGS)
+  local tgt maxr minr
+  tgt=$(getb $F_TGT); maxr=$(getb $F_MAXR); minr=$(getb $F_MINR)
+  local mode="firmware curve (auto)"
+  [ $(( f & FNSW_BIT )) -ne 0 ] && mode="COMMANDED by fanctl"
+  printf '\n'
+  printf '  mode   %s\n' "$mode"
+  printf '  target %5d RPM  (0x%02X = %d reg units x 100)\n' "$(( tgt * 100 ))" "$tgt" "$tgt"
+  printf '  fan    %5d RPM  (EC register 0x811)\n' "$(( $(rpm_now) * 100 ))"
+  printf '  limits %d..%d RPM commanded;  FNMX=%d FNMN=%d\n' 0 "$(( maxr * 100 ))" "$maxr" "$minr"
+  printf '  flags  0x%02X  FANE=%d FNSW=%d WPFM=%d\n' "$f" $(( f & 1 )) $(( (f >> 3) & 1 )) $(( (f >> 6) & 1 ))
+  printf '  temp   %s C      power %s\n' "$(cput)" "$(acst)"
+  [ -f "$GUARDPID" ] && printf '  guard  armed at %s C (pid %s)\n' "$GUARD_TEMP" "$(cat "$GUARDPID")" \
+                     || printf '  guard  disarmed\n'
+  printf '\n  note: the RPM figure is the EC commanded value, not a tach reading.\n\n'
+}
+
+save_conf(){ mkdir -p "$(dirname "$CONF")"; printf '%s\n' "$1" > "$CONF"; chmod 644 "$CONF"; }
+
+case "$1" in
+status|"")
+  show ;;
+
+list)
+  printf '\n  profile        RPM   flag    meaning\n'
+  printf '  -----------    ----   ----    ------------------------------\n'
+  for p in silent quiet balanced performance max; do
+    printf '  %-12s  %5d   %-6s  %s\n' "$p" "$(( ${PROFILE[$p]} * 100 ))" "" "${PDESC[$p]}"
+  done
+  printf '  %-12s  %5s   %-6s  %s\n' "manual <rpm>" "any" "" "hold an explicit speed"
+  printf '  %-12s  %5s   %-6s  %s\n' "auto" "-" "FNSW=0" "firmware temperature curve"
+  printf '  %-12s  %5s   %-6s  %s\n' "onac <prof>" "-" "" "apply when on mains"
+  printf '  %-12s  %5s   %-6s  %s\n' "ondc <prof>" "-" "" "apply when on battery"
+  printf '  %-12s  %5s   %-6s  %s\n\n' "guard [degC]" "85" "" "auto-revert threshold"
+  ;;
+
+set|manual|custom|silent|quiet|balanced|performance|max)
+  if [ "$1" = set ]; then p=$2; arg=$3; else p=$1; arg=$2; fi
+  if [ "$p" = manual ] || [ "$p" = custom ]; then
+    case ${arg:-} in ''|*[!0-9]*) echo "fanctl: manual needs an RPM value: fanctl manual 2500" >&2; exit 1 ;; esac
+    units=$(( arg / 100 )); [ "$units" -eq 0 ] && [ "$arg" -ne 0 ] && units=1
+    desc="manual $arg RPM"
+  else
+    [ -n "${PROFILE[$p]:-}" ] || { echo "fanctl: unknown profile '$p' (try: fanctl list)" >&2; exit 1; }
+    units=${PROFILE[$p]}; desc="$p"
+  fi
+  # the EC's own FNMX is the ceiling; commanding past it is at best ignored
+  ceiling=$(getb $F_MAXR); clamped=0
+  if [ "$ceiling" -gt 0 ] && [ "$units" -gt "$ceiling" ]; then units=$ceiling; clamped=1; fi
+  command_units "$units" || exit 1
+  start_guard
+  if [ "$clamped" = 1 ]; then
+    printf '  %s -> clamped to %d RPM (register ceiling FNMX=%d)\n' "$desc" "$(( units * 100 ))" "$ceiling"
+  else
+    printf '  %s -> %d RPM commanded (0x%02X = %d reg units)\n' "$desc" "$(( units * 100 ))" "$units" "$units"
+  fi
+  sleep 1; show
+  ;;
+
+auto)
+  to_auto || exit 1
+  stop_guard
+  echo "  released to the firmware temperature curve (FNSW cleared)"
+  sleep 1; show
+  ;;
+
+guard)
+  [ -n "$2" ] && GUARD_TEMP=$2
+  save_conf "GUARD_TEMP=$GUARD_TEMP"
+  start_guard
+  echo "  thermal guard armed: release to auto at >= ${GUARD_TEMP}C"
+  ;;
+
+onac|ondc)
+  p=$2
+  case $p in auto) ;; *) [ -n "${PROFILE[$p]:-}" ] || { echo "fanctl: unknown profile '$p'" >&2; exit 1; } ;; esac
+  mkdir -p "$(dirname "$CONF")"
+  key=$([ "$1" = onac ] && echo ONAC || echo ONDC)
+  [ -f "$CONF" ] || : > "$CONF"
+  grep -v "^$key=" "$CONF" > "$CONF.tmp"; mv "$CONF.tmp" "$CONF"
+  echo "$key=$p" >> "$CONF"
+  chmod 644 "$CONF"
+  echo "  when on $([ "$1" = onac ] && echo 'mains' || echo 'battery'): $p"
+  echo "  apply now with: fanctl apply"
+  ;;
+
+apply)
+  [ -f "$CONF" ] || { echo "fanctl: no $CONF - use 'fanctl onac <profile>' first" >&2; exit 1; }
+  . "$CONF"
+  src=$(acst)
+  [ "$src" = AC ] && p=${ONAC:-} || p=${ONDC:-}
+  [ -n "$p" ] || { echo "fanctl: no profile configured for $src" >&2; exit 1; }
+  if [ "$p" = auto ]; then
+    to_auto || exit 1; stop_guard
+    echo "  $src -> auto (firmware curve)"
+  else
+    command_units "${PROFILE[$p]}" || exit 1; start_guard
+    echo "  $src -> $p ($(( ${PROFILE[$p]} * 100 )) RPM)"
+  fi
+  show
+  ;;
+
+usage)
+  cat <<EOF
+  fanctl - fan profiles for HP Envy x360 13-ay (board 8929)
+
+    fanctl list                 show the profiles
+    fanctl <profile>            apply one (silent/quiet/balanced/performance/max)
+    fanctl manual <rpm>         hold an explicit speed, e.g. fanctl manual 2500
+    fanctl auto                 release to the firmware temperature curve
+    fanctl status               what is commanded right now
+    fanctl guard [degC]         release to auto at >= degC (default 85)
+    fanctl onac <profile>       profile to use on mains
+    fanctl ondc <profile>       profile to use on battery
+    fanctl apply                apply the profile matching the current power source
+
+  Fan speed is held by setting FNSW in the EC flags and writing 100-RPM units
+  to 0x814. FNSW stays set while the command is active; "auto" clears it and
+  hands the fan back to the firmware temperature curve. A thermal guard watches
+  CPU temperature and releases to auto if you command a speed the machine
+  cannot run at.
+EOF
+  ;;
+esac
