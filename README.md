@@ -125,19 +125,31 @@ cross-check, nothing more. See [`vendor/acpi_call/PATCHES.md`](vendor/acpi_call/
 ## tests
 
 ```sh
-sudo tests/run-all
+bash tests/run-all          # no root, no hardware - run this freely
+sudo tests/run-all          # also runs the hardware tests
 ```
 
-| Script      | What it proves                                                  |
-|-------------|-----------------------------------------------------------------|
-| `fanlatch`  | `FNSW` is a latch: same target, released vs latched, must disagree |
-| `fantail`   | The low end of the range is reachable, with settle time         |
-| `fanoff`    | How warm the machine actually gets with the fan stopped         |
-| `fansweep`  | Sweeps flag combinations. Interactive; re-derives the mechanism  |
-| `run-all`   | Runs the non-interactive ones, restores state between them      |
+| Script           | Root | What it proves                                                  |
+|------------------|------|-----------------------------------------------------------------|
+| `harness`        | no   | 70 checks on the real `fanctl` against a fake EC: bad input, overflow, injection, concurrency, guard lifetime |
+| `fanrpm-display` | no   | `fanrpm` never shows a failed read as a measurement             |
+| `fanlatch`       | yes  | `FNSW` is a latch: same target, released vs latched, must disagree |
+| `fantail`        | yes  | The low end of the range is reachable, with settle time         |
+| `fanoff`         | yes  | How warm the machine actually gets with the fan stopped         |
+| `fansweep`       | yes  | Sweeps flag combinations. Interactive; re-derives the mechanism  |
+| `run-all`        | -    | Runs the non-interactive ones, restores state between them      |
 
-All of them restore the firmware curve on exit, including on Ctrl-C, and all
-of them need root. Run them one at a time - they share one fan.
+The two unprivileged scripts touch nothing real: they run the **shipped**
+`bin/fanctl` against a sparse file standing in for the EC, inside a user
+namespace. They are the regression suite, and they are the only way to test
+overflow, injection, concurrency and guard races without stopping your actual
+fan. Run them after any edit.
+
+The rest write to the real EC, restore the firmware curve on exit including on
+Ctrl-C, and need root. Run them one at a time - they share one fan.
+
+What was found and fixed, and what these tests still cannot prove, is written
+up in [`docs/safety-audit.md`](docs/safety-audit.md).
 
 ## why nothing else works
 
@@ -168,6 +180,7 @@ bin/fanctl                  the tool
 bin/fanrpm                  live monitor
 tests/                      verification scripts
 docs/register-map.md        EC register map and the addressing trap
+docs/safety-audit.md        bugs found, why the tests are built this way
 docs/HOW-WE-GOT-HERE.md     the investigation, dead ends, and mistakes
 docs/aml/                   decompiled DSDT/SSDT6 from this machine
 vendor/acpi_call/           kernel module, patched for 7.x

@@ -12,12 +12,17 @@
 BASE=$((0xFE0B0000))
 OFF=$((0x800))
 LEN=24
-K10=/sys/class/hwmon/hwmon6/temp1_input
-ACPI=/proc/acpi/call
+# Overridable for the same reason as in fanctl: so tests/fanrpm-display can
+# drive this exact script with a fake sensor and a fake EC, as an unprivileged
+# user, with nothing real read or written. Unset means the real path, so normal
+# use is unaffected, and sudo scrubs the environment anyway.
+MEM=${MEM:-/dev/mem}
+K10=${K10:-/sys/class/hwmon/hwmon6/temp1_input}
+ACPI=${ACPI:-/proc/acpi/call}
 SPARK=(▁ ▂ ▃ ▄ ▅ ▆ ▇ █)
 HIST=()
 
-[ "$(id -u)" = 0 ] || { echo "fanrpm: must run as root (reads /dev/mem)" >&2; exit 1; }
+[ "$(id -u)" = 0 ] || { echo "fanrpm: must run as root (reads $MEM)" >&2; exit 1; }
 
 # The AML column is a nice cross-check but is optional: it needs acpi_call.ko,
 # which is not packaged and does not survive a reboot. The raw /dev/mem column
@@ -29,7 +34,16 @@ amlv() {
   [ "$HAVE_ACPI" = 1 ] || { echo -1; return; }
   printf '%s\n' "$1" > "$ACPI" 2>/dev/null
   local v; v=$(cat "$ACPI" 2>/dev/null | tr '\000' '\n' | head -n1 | tr -cd '[:print:]')
-  [[ $v =~ ^0x ]] && echo $(( v )) || echo -1
+  # Validate the whole shape before doing arithmetic on it. The AML normally
+  # returns something like "0x1E", but a failing or erroring call can return
+  # "", "0x", "Error", or an object path. $(( )) on any of those is a shell
+  # error or a garbage number, and the old "starts with 0x" test let "0x"
+  # straight through - leaving F_RPM_AML empty, which then compared as a
+  # non-number further down and printed as 0 RPM.
+  case $v in
+    0x[0-9a-fA-F]*) echo $(( v )) ;;
+    *) echo -1 ;;
+  esac
 }
 
 R=()
@@ -46,15 +60,21 @@ ac_state() {
 
 # one dd per cycle reads the whole fan register block from physical memory
 sample() {
-  mapfile -t R < <(dd if=/dev/mem bs=1 skip=$((BASE+OFF)) count=$LEN 2>/dev/null \
+  mapfile -t R < <(dd if=$MEM bs=1 skip=$((BASE+OFF)) count=$LEN 2>/dev/null \
                     | od -An -tx1 -v | tr -s ' ' '\n' | grep -v '^$')
 
   local f
   f=$(rd $((OFF+0x0F)))
+  F_FLAGS_RAW=$f
   FANE=$(( f & 1 )); FNSW=$(( (f >> 3) & 1 )); WPFM=$(( (f >> 6) & 1 ))
-  F_RPM_RAW=$(( $(rd $((OFF+0x11))) * 100 ))
-  F_MAX=$(( $(rd $((OFF+0x12))) * 100 ))
-  F_MIN=$(( $(rd $((OFF+0x13))) * 100 ))
+  # rd returns -1 when a register could not be read. Multiplying that by 100
+  # yields "-100 RPM" - a number no fan can report, which then reads on screen
+  # as a real measurement. Normalise every value that can reach the display
+  # here, once, so no print statement has to think about it.
+  scalerpm(){ [ "$1" -lt 0 ] 2>/dev/null && { echo -1; return; }; echo $(( $1 * 100 )); }
+  F_RPM_RAW=$(scalerpm "$(rd $((OFF+0x11)))")
+  F_MAX=$(scalerpm "$(rd $((OFF+0x12)))")
+  F_MIN=$(scalerpm "$(rd $((OFF+0x13)))")
   F_TGT=$(rd $((OFF+0x14)))
   F_CFG=$(rd $((OFF+0x08)))
 
@@ -69,10 +89,17 @@ sample() {
   fi
   F_AC=$(ac_state)
   F_RPM=$F_RPM_AML
-  [ "$F_RPM" -lt 0 ] && F_RPM=$F_RPM_RAW
-
-  HIST+=("$F_RPM")
+  [ "$F_RPM" -lt 0 ] 2>/dev/null && F_RPM=$F_RPM_RAW
+  # A failed sample must not poison the history: -1 would count as a reading
+  # and skew both the peak and every bar height derived from it.
+  [ "$F_RPM" -lt 0 ] 2>/dev/null || HIST+=("$F_RPM")
   [ "${#HIST[@]}" -gt 90 ] && HIST=("${HIST[@]:1}")
+  # HIST can legitimately be empty now that failed samples are not recorded.
+  # If every read failed there is nothing to plot, and ${HIST[0]} on an empty
+  # array expands to nothing, so the comparison below would fail with
+  # "integer expected" on every single refresh.
+  F_SPARK=""
+  [ "${#HIST[@]}" -gt 0 ] || return 0
   local m=${HIST[0]} v out="" i
   for v in "${HIST[@]}"; do [ "$v" -gt "$m" ] && m=$v; done
   [ "$m" -lt 1 ] && m=1
@@ -83,13 +110,21 @@ sample() {
   F_SPARK="$out"
 }
 
+# Never print a negative RPM. A negative value means the register could not be
+# read; "-100 RPM" on a monitor looks like a measurement, and an implausible
+# number on screen has already misled this user once. Say it in words instead.
+# Defined at top level because both the one-shot and the live path use it.
+r(){ [ "${1:-0}" -lt 0 ] 2>/dev/null && { echo "unreadable"; return; }; echo "${1:-?}"; }
+rpmfield(){ [ "${1:-0}" -lt 0 ] 2>/dev/null && { printf 'unreadable'; return; }; printf '%5d' "${1:-0}"; }
+
 if [ "$1" = "--once" ]; then
   sample
-  printf "  %-12s  fan %5d RPM  (AML %d / raw %d)  CPU %s C  target %d  range %d-%d RPM\n" \
-    "$F_AC" "$F_RPM" "$F_RPM_AML" "$F_RPM_RAW" "$F_TMP" "$F_TGT" "$F_MIN" "$F_MAX"
+  printf "  %-12s  fan %s RPM  (AML %s / raw %s)  CPU %s C  target %s  range %s-%s RPM\n" \
+    "$F_AC" "$(r "$F_RPM")" "$(r "$F_RPM_AML")" "$(r "$F_RPM_RAW")" "$F_TMP" "$(r "$F_TGT")" "$(r "$F_MIN")" "$(r "$F_MAX")"
   exit 0
 fi
 
+# Same rule for the live display.
 trap 'echo; exit 0' INT TERM
 while true; do
   sample
@@ -97,16 +132,23 @@ while true; do
   printf '  HP Envy x360 13-ay  -  fan monitor          %s\n\n' "$(date '+%H:%M:%S')"
   printf '  +--------------------------------------------------+\n'
   printf '  |                                                  |\n'
-  printf '  |    FAN   %5d RPM                            |\n' "$F_RPM"
-  printf '  |    CPU   %5s C                              |\n' "$F_TMP"
-  printf '  |    PWR   %-30s |\n' "$F_AC"
+  printf '  |    FAN  %s RPM                           |\n' "$(rpmfield "$F_RPM")"
+  printf '  |    CPU  %5s C                              |\n' "$F_TMP"
+  printf '  |    PWR  %-30s |\n' "$F_AC"
   printf '  |                                                  |\n'
   printf '  +--------------------------------------------------+\n\n'
-  printf '  AML  FRSP / FMAX / FMIN : %d / %d / %d RPM\n' "$F_RPM_AML" "$F_MAX_AML" "$F_MIN_AML"
-  printf '  raw  0x811 / 0x812 / 0x813: %d / %d / %d RPM\n' "$F_RPM_RAW" "$F_MAX" "$F_MIN"
-  printf '  EC   target 0x814 FWPM  : %-5s (0 = firmware curve, non-zero = commanded)\n' "$F_TGT"
-  printf '  EC   config 0x808 PSPD  : %-5s   0x809 CSRT ramp: %s\n' "$F_CFG" "$(rd $((OFF+0x09)))"
-  printf '  EC   flags  0x80F       : FANE=%d FNSW=%d WPFM=%d\n' "$FANE" "$FNSW" "$WPFM"
+  printf '  AML  FRSP / FMAX / FMIN : %s / %s / %s RPM\n' "$(r "$F_RPM_AML")" "$(r "$F_MAX_AML")" "$(r "$F_MIN_AML")"
+  printf '  raw  0x811 / 0x812 / 0x813: %s / %s / %s RPM\n' "$(r "$F_RPM_RAW")" "$(r "$F_MAX")" "$(r "$F_MIN")"
+  printf '  EC   target 0x814 FWPM  : %-10s (0 = firmware curve, non-zero = commanded)\n' "$(r "$F_TGT")"
+  printf '  EC   config 0x808 PSPD  : %-10s   0x809 CSRT ramp: %s\n' "$(r "$F_CFG")" "$(r "$(rd $((OFF+0x09)))")"
+  # FANE/FNSW/WPFM are bit extractions. From an unreadable flags byte (-1) they
+  # all come out as 1, which reads as a confident claim that the fan is faulted
+  # and manually latched. It is a failure to read, not a state.
+  if [ "$F_FLAGS_RAW" -lt 0 ]; then
+    printf '  EC   flags  0x80F       : unreadable\n'
+  else
+    printf '  EC   flags  0x80F       : 0x%02X  FANE=%d FNSW=%d WPFM=%d\n' "$F_FLAGS_RAW" "$FANE" "$FNSW" "$WPFM"
+  fi
   printf '  \n  last %d samples\n  %s\n' "${#HIST[@]}" "$F_SPARK"
   sleep 1
 done

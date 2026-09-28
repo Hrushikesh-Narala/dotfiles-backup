@@ -25,14 +25,22 @@
 #   cannot do. Treat the RPM figure as "what the EC is commanding".
 
 BASE=$((0xFE0B0000)); OFF=$((0x800))
-K10=/sys/class/hwmon/hwmon6/temp1_input
-GUARDPID=/run/fanctl.guard
-CONF=/etc/fanctl.conf
-GUARD_TEMP=85
+# Paths and thresholds honour an environment override so the test harness can
+# drive this exact script against a fake EC as an unprivileged user, with
+# nothing real touched. This is a standard seam and not a privilege issue:
+# sudo scrubs the environment, so an unprivileged user cannot inject a path
+# into a root invocation. If the variable is simply absent, the normal
+# location is used and nothing changes.
+MEM=${MEM:-/dev/mem}
+K10=${K10:-/sys/class/hwmon/hwmon6/temp1_input}
+GUARDPID=${GUARDPID:-/run/fanctl.guard}
+CONF=${CONF:-/etc/fanctl.conf}
+LOCK=${LOCK:-/run/fanctl.lock}
+GUARD_TEMP=${GUARD_TEMP:-85}
 # "off" is the one mode with no cooling at all, so it gets a much lower trip
 # point than the ordinary profiles. 85 C is fine when the fan is still moving
 # air; it is not fine with the blades stopped.
-OFF_GUARD_TEMP=70
+OFF_GUARD_TEMP=${OFF_GUARD_TEMP:-70}
 
 F_FLAGS=0x0F
 F_TGT=0x14
@@ -51,18 +59,34 @@ declare -A PDESC=(
   [max]="firmware ceiling FNMX, loudest"
 )
 
-[ "$(id -u)" = 0 ] || { echo "fanctl: must run as root (writes /dev/mem)" >&2; exit 1; }
+[ "$(id -u)" = 0 ] || { echo "fanctl: must run as root (writes $MEM)" >&2; exit 1; }
 # NOTE: this tool deliberately does NOT use the ACPI call interface. Reading the
 # AML needs acpi_call.ko, which is not packaged for this distro and does not
 # survive a reboot; depending on it would break fanctl after every update.
 # Everything here goes through /dev/mem instead, which needs nothing extra.
 
-getb(){ local v; v=$(dd if=/dev/mem bs=1 skip=$((BASE+OFF+$1)) count=1 status=none 2>/dev/null|od -An -tx1 -v|tr -d ' \n')
+getb(){ local v; v=$(dd if=$MEM bs=1 skip=$((BASE+OFF+$1)) count=1 status=none 2>/dev/null|od -An -tx1 -v|tr -d ' \n')
          case $v in ''|*[!0-9a-fA-F]*) echo -1 ;; *) echo $(( 16#$v )) ;; esac; }
-putb(){ printf "\\$(printf '%03o' "$2")" | dd of=/dev/mem bs=1 seek=$((BASE+OFF+$1)) conv=notrunc status=none; }
+
+# putb refuses anything outside 0-255. Without this, printf '%03o' of 256 is
+# "400" - three octal digits - and dd would write three bytes, smearing into
+# 0x815 and 0x816. Cheap to check, and it makes a caller-side bug impossible
+# to turn into register corruption.
+putb(){
+  local off=$1 val=$2
+  case $val in ''|*[!0-9]*) echo "fanctl: refusing to write non-numeric value '$val' to 0x$off" >&2; return 1 ;;
+  esac
+  if [ "$val" -lt 0 ] || [ "$val" -gt 255 ]; then
+    echo "fanctl: refusing to write $val to 0x$off (must be 0-255)" >&2; return 1
+  fi
+  printf "\\$(printf '%03o' "$val")" | dd of=$MEM bs=1 seek=$((BASE+OFF+$off)) conv=notrunc status=none
+}
 cput(){ [ -r "$K10" ] && awk -v m="$(cat "$K10")" 'BEGIN{printf "%.1f",m/1000}' || echo "?"; }
 rpm_now(){ getb $F_RPM; }   # 0x811, the same register the AML reads
-acst(){ local p; for p in /sys/class/power_supply/AC*/online; do
+# PWRDIR is overridable for the same reason as the other paths: it makes the
+# AC/DC profile-selection branch testable without unplugging the laptop. The
+# fallback is the real sysfs location, so normal use is unaffected.
+acst(){ local p; for p in ${PWRDIR:-/sys/class/power_supply}/AC*/online; do
           [ -r "$p" ] && [ "$(cat "$p")" = 1 ] && { echo AC; return; }; done; echo DC; }
 
 # command <units>: set FNSW, write target, LEAVE FNSW SET.
@@ -73,12 +97,28 @@ acst(){ local p; for p in /sys/class/power_supply/AC*/online; do
 # bits are preserved so we never clobber a bit the EC manages itself.
 command_units(){
   local u=$1 f got
+  # Guard the register-value range here as well as in putb. This is the choke
+  # point every write passes through, so an out-of-range value can never reach
+  # the EC no matter which caller produced it.
+  case $u in ''|*[!0-9]*) echo "fanctl: internal error: non-numeric target '$u'" >&2; return 1 ;; esac
+  if [ "$u" -lt 0 ] || [ "$u" -gt 255 ]; then
+    echo "fanctl: internal error: target $u out of range 0-255" >&2; return 1
+  fi
+  # Refuse to build a flags value out of a failed read. getb returns -1, and
+  # arithmetic on -1 yields -1, so without this the "preserve the other bits"
+  # logic would write -1 and the error would surface as a baffling range
+  # complaint from putb rather than as "the EC is unreadable".
   f=$(getb $F_FLAGS)
-  putb $F_FLAGS $(( f | FNSW_BIT ))
-  putb $F_TGT "$u"
+  if [ "$f" -lt 0 ]; then
+    echo "fanctl: cannot read the EC flags register (0x$(printf '%X' $((OFF+F_FLAGS))) returned no data)." >&2
+    echo "         Check /dev/mem is readable, and that lockdown is not set." >&2
+    return 1
+  fi
+  putb $F_FLAGS $(( f | FNSW_BIT )) || return 1
+  putb $F_TGT "$u" || return 1
   f=$(getb $F_FLAGS)
   got=$(getb $F_TGT)
-  if [ $(( f & FNSW_BIT )) -eq 0 ]; then
+  if [ "$f" -lt 0 ] || [ $(( f & FNSW_BIT )) -eq 0 ]; then
     echo "fanctl: FNSW would not latch - the EC will not hold a commanded speed." >&2
     return 1
   fi
@@ -89,12 +129,23 @@ command_units(){
 # auto: drop FNSW so the firmware's own temperature curve resumes
 to_auto(){
   local f; f=$(getb $F_FLAGS)
-  putb $F_FLAGS $(( f & ~FNSW_BIT ))
-  [ $(( $(getb $F_FLAGS) & FNSW_BIT )) -eq 0 ] || { echo "fanctl: could not clear FNSW" >&2; return 1; }
+  if [ "$f" -lt 0 ]; then
+    echo "fanctl: cannot read the EC flags register; will not guess." >&2
+    return 1
+  fi
+  putb $F_FLAGS $(( f & ~FNSW_BIT )) || return 1
+  f=$(getb $F_FLAGS)
+  [ "$f" -lt 0 ] && { echo "fanctl: flags register unreadable after write" >&2; return 1; }
+  [ $(( f & FNSW_BIT )) -eq 0 ] || { echo "fanctl: could not clear FNSW" >&2; return 1; }
   return 0
 }
 
-stop_guard(){ [ -f "$GUARDPID" ] && kill "$(cat "$GUARDPID")" 2>/dev/null; rm -f "$GUARDPID"; }
+stop_guard(){
+  [ -f "$GUARDPID" ] && kill "$(cat "$GUARDPID")" 2>/dev/null
+  # The sidecar must go too, or a later "status" reports a trip temperature
+  # belonging to a guard that no longer exists.
+  rm -f "$GUARDPID" "$GUARDPID.trip"
+}
 
 # start_guard [trip-temp]
 #
@@ -105,13 +156,51 @@ stop_guard(){ [ -f "$GUARDPID" ] && kill "$(cat "$GUARDPID")" 2>/dev/null; rm -f
 start_guard(){
   local trip=${1:-$GUARD_TEMP}
   [ "$trip" = 0 ] && { stop_guard; return 0; }
+  # Resolve an absolute path to this script NOW, while we still can. The guard
+  # re-execs itself when it trips, long after the invoking shell is gone, and
+  # "$0" at that point is whatever the caller happened to type. If that was a
+  # bare "fanctl" and PATH differs in the guard's environment, the re-exec
+  # fails - and its output is discarded, so the guard would die silently with
+  # the fan still latched. A resolved path cannot rot that way.
+  local self
+  self=$(readlink -f "$0" 2>/dev/null) || self=
+  [ -n "$self" ] && [ -x "$self" ] || self=$(command -v fanctl 2>/dev/null)
+  [ -n "$self" ] && [ -x "$self" ] || { echo "fanctl: cannot resolve own path; guard not started" >&2; return 1; }
   stop_guard
-  ( while :; do
+  ( # Drop the inherited lock descriptor FIRST. A background subshell shares the
+    # parent's open file description, and flock locks live on the description,
+    # not the process - so a guard that kept fd 9 would hold the fanctl lock for
+    # as long as it ran. Every later fanctl, including a read-only `status`,
+    # would then stall for the full lock timeout. Measured: 5.02s per command.
+    [ -n "$LOCK_FD" ] && eval "exec $LOCK_FD>&-"
+    # The parent publishes our pid in the file immediately after forking us, and
+    # we may simply have won that race. Give it a moment to appear, then refuse
+    # to run at all if it never does - an unfenced guard is worse than none.
+    n=0
+    while [ "$n" -lt 10 ]; do
+      [ "$(cat "$GUARDPID" 2>/dev/null)" = "$BASHPID" ] && break
+      n=$(( n + 1 )); sleep 0.1
+    done
+    [ "$n" -lt 10 ] || exit 0
+    while :; do
+      # Self-fencing. Relying on stop_guard to kill the previous guard is not
+      # enough: concurrent invocations all read the same pid file, kill the
+      # same pid, and the losers are never killed by anyone - they poll forever.
+      # Measured: 43 live guards after one harness run. A stranded guard is not
+      # just a leak, it is a live actor holding a stale trip point that can
+      # release the fan at a temperature the current profile never agreed to.
+      # So every guard re-checks, each poll, that it is still the current one.
+      # $BASHPID, not $$: $$ is still the parent shell's pid inside a subshell.
+      [ "$(cat "$GUARDPID" 2>/dev/null)" = "$BASHPID" ] || exit 0
       t=$(cput)
       case $t in ''|*[!0-9.]*) ;; *)
         if awk -v t="$t" -v l="$trip" 'BEGIN{exit !(t>=l)}'; then
           logger -t fanctl "thermal guard tripped at ${t}C (threshold ${trip}C) - releasing fan to firmware curve"
-          "$0" auto >/dev/null 2>&1
+          # Clean up the pid files ourselves. If the re-exec fails, "auto" never
+          # runs stop_guard, and a stale pid file makes status claim a guard is
+          # armed when none is.
+          rm -f "$GUARDPID" "$GUARDPID.trip"
+          "$self" auto >/dev/null 2>&1
           exit 0
         fi ;;
     esac
@@ -121,18 +210,70 @@ start_guard(){
   echo "$trip" > "$GUARDPID.trip"
 }
 
+# A lock prevents two concurrent invocations from interleaving their
+# three-write sequences. Without it, two fanctl calls can interleave as
+# "A sets FNSW, B sets FNSW, A writes target, A releases FNSW, B writes
+# target" - leaving B's target in place with FNSW clear, so B believes it
+# commanded a speed and the firmware is actually running. That is the torn
+# state the earlier audit reproduced, and it is a correctness bug, not a
+# cosmetic one.
+LOCK_FD=
+# DANGER, and it cost a real bug once already: "exec 9>$LOCK 2>/dev/null" does
+# NOT scope the 2>/dev/null to the exec. A bare `exec` with redirections and no
+# command applies them to the CURRENT shell permanently, so that one line
+# silently discarded stderr for the rest of the program. Every error message
+# below - refused writes, unreadable EC, failed latch - vanished, and fanctl
+# just appeared to do nothing. Never put a redirection on a bare `exec` here.
+acquire_lock(){
+  command -v flock >/dev/null || return 0
+  if ! exec 9>"$LOCK"; then
+    echo "fanctl: cannot open lock file $LOCK - continuing without it." >&2
+    return 0
+  fi
+  LOCK_FD=9
+  flock -w 5 9 || echo "fanctl: another fanctl held the lock for 5s, proceeding anyway" >&2
+  return 0
+}
+release_lock(){ [ "$LOCK_FD" = 9 ] && { exec 9>&-; LOCK_FD=; }; return 0; }
+
 show(){
   local f; f=$(getb $F_FLAGS)
   local tgt maxr minr
   tgt=$(getb $F_TGT); maxr=$(getb $F_MAXR); minr=$(getb $F_MINR)
+  # getb returns -1 on failure. Arithmetic and comparison both need a real
+  # number, so normalise once here instead of scattering guards.
+  [ "$tgt" -lt 0 ] 2>/dev/null && tgt=-1
+  [ "$maxr" -lt 0 ] 2>/dev/null && maxr=-1
+  [ "$minr" -lt 0 ] 2>/dev/null && minr=-1
   local mode="firmware curve (auto)"
   [ $(( f & FNSW_BIT )) -ne 0 ] && mode="COMMANDED by fanctl"
   printf '\n'
   printf '  mode   %s\n' "$mode"
-  printf '  target %5d RPM  (0x%02X = %d reg units x 100)\n' "$(( tgt * 100 ))" "$tgt" "$tgt"
-  printf '  fan    %5d RPM  (EC register 0x811)\n' "$(( $(rpm_now) * 100 ))"
-  printf '  limits %d..%d RPM commanded;  FNMX=%d FNMN=%d\n' 0 "$(( maxr * 100 ))" "$maxr" "$minr"
+  if [ "$tgt" -lt 0 ]; then
+    printf '  target   unreadable\n'
+  else
+    printf '  target %5d RPM  (0x%02X = %d reg units x 100)\n' "$(( tgt * 100 ))" "$tgt" "$tgt"
+  fi
+  fr=$(rpm_now)
+  if [ "$fr" -lt 0 ]; then
+    printf '  fan    unreadable  (EC register 0x811)\n'
+  else
+    printf '  fan    %5d RPM  (EC register 0x811)\n' "$(( fr * 100 ))"
+  fi
+  if [ "$maxr" -lt 0 ] || [ "$minr" -lt 0 ]; then
+    printf '  limits   unreadable\n'
+  else
+    printf '  limits %d..%d RPM commanded;  FNMX=%d FNMN=%d\n' 0 "$(( maxr * 100 ))" "$maxr" "$minr"
+  fi
   printf '  flags  0x%02X  FANE=%d FNSW=%d WPFM=%d\n' "$f" $(( f & 1 )) $(( (f >> 3) & 1 )) $(( (f >> 6) & 1 ))
+  # FNSW and the target are two separate writes, so a status issued while
+  # another fanctl is mid-sequence can catch them disagreeing. Say so rather
+  # than print a mode that is not real.
+  if [ $(( f & FNSW_BIT )) -ne 0 ] && [ "$tgt" -lt 0 ]; then
+    printf '  WARNING: target register unreadable, but FNSW is latched.\n'
+    printf '  The fan is under manual control with an unknown target. Run\n'
+    printf '  "fanctl auto" to hand it back to the firmware curve.\n'
+  fi
   printf '  temp   %s C      power %s\n' "$(cput)" "$(acst)"
   if [ -f "$GUARDPID" ]; then
     # the guard writes its own trip point back, so status is truthful even when
@@ -151,6 +292,21 @@ show(){
 }
 
 save_conf(){ mkdir -p "$(dirname "$CONF")"; printf '%s\n' "$1" > "$CONF"; chmod 644 "$CONF"; }
+
+# Only subcommands that WRITE the EC take the lock. status, list and usage are
+# read-only and must never block: "fanrpm" and any monitoring call fanctl, and
+# a 5 second stall on every poll would be worse than useless.
+#
+# This has to be decided from the argument BEFORE the case statement, because
+# by then every branch has already run.
+case "${1:-}" in
+  status|""|list|usage) readonly=1 ;;
+  *)                    readonly= ;;
+esac
+if [ -z "$readonly" ]; then
+  acquire_lock
+  trap 'release_lock' EXIT
+fi
 
 case "$1" in
 status|"")
@@ -173,16 +329,52 @@ list)
 
 set|manual|custom|off|silent|quiet|balanced|performance|max)
   if [ "$1" = set ]; then p=$2; arg=$3; else p=$1; arg=$2; fi
+  # NB: "set" is a wrapper that shifts args (fanctl set manual 2500), so it is
+  # deliberately NOT in this list. "set silent" must still reach the profile
+  # branch below with p=silent and no numeric argument.
+  #
+  # "fanctl set" with no profile at all leaves p empty, and an empty array
+  # subscript is a bash error, not a graceful message. Catch it here.
+  [ -n "$p" ] || { echo "fanctl: set needs a profile, e.g. 'fanctl set silent' or 'fanctl set manual 2500'" >&2; exit 1; }
   if [ "$p" = manual ] || [ "$p" = custom ]; then
-    case ${arg:-} in ''|*[!0-9]*) echo "fanctl: manual needs an RPM value: fanctl manual 2500" >&2; exit 1 ;; esac
-    units=$(( arg / 100 )); [ "$units" -eq 0 ] && [ "$arg" -ne 0 ] && units=1
+    case ${arg:-} in ''|*[!0-9]*)
+      echo "fanctl: manual needs a plain RPM value, e.g. fanctl manual 2500" >&2; exit 1 ;;
+    esac
+    # Reject anything that would not survive a round trip through bash integer
+    # arithmetic BEFORE dividing it.
+    #
+    # This matters more than it looks. 64-bit signed max is 9223372036854775807.
+    # "fanctl manual 18446744073709551615" divided by 100 wraps to exactly 0,
+    # and 0 is not an error - it is the command to STOP THE FAN. The FNMX clamp
+    # cannot catch it, because the wrapped value is below the ceiling, so the
+    # clamp would pass it through and the fan would stop with an ordinary
+    # looking profile command and the 85 C guard instead of the 70 C one.
+    #
+    # Reject anything implausible outright. The measured ceiling is 5900, so
+    # five digits is already 17x beyond the hardware; there is no legitimate
+    # reason to accept more, and refusing early keeps the intent obvious.
+    if [ "${#arg}" -gt 5 ] || [ "$arg" -gt 99999 ]; then
+      echo "fanctl: RPM value out of range: $arg (max 99999; the real ceiling is FNMX, ~5900 here)" >&2
+      exit 1
+    fi
+    units=$(( arg / 100 ))
+    [ "$units" -eq 0 ] && [ "$arg" -ne 0 ] && units=1
     desc="manual $arg RPM"
   else
     [ -n "${PROFILE[$p]:-}" ] || { echo "fanctl: unknown profile '$p' (try: fanctl list)" >&2; exit 1; }
     units=${PROFILE[$p]}; desc="$p"
   fi
   # the EC's own FNMX is the ceiling; commanding past it is at best ignored
-  ceiling=$(getb $F_MAXR); clamped=0
+  ceiling=$(getb $F_MAXR)
+  if [ "$ceiling" -lt 0 ]; then
+    # Without FNMX there is no clamp, so a large request would go straight to
+    # the register. Refuse rather than write blind - the write itself would
+    # still be bounded by putb, but the resulting error would be baffling and
+    # the commanded speed would be one nobody chose.
+    echo "fanctl: cannot read FNMX (0x812), so the safe ceiling is unknown; refusing to command a speed." >&2
+    exit 1
+  fi
+  clamped=0
   if [ "$ceiling" -gt 0 ] && [ "$units" -gt "$ceiling" ]; then units=$ceiling; clamped=1; fi
 
   # "off" stops the fan outright, so it gets its own lower trip point and a
@@ -215,8 +407,27 @@ auto)
   ;;
 
 guard)
-  [ -n "$2" ] && GUARD_TEMP=$2
-  save_conf "GUARD_TEMP=$GUARD_TEMP"
+  if [ -n "$2" ]; then
+    # STRICT validation, because this value is written to a file that "apply"
+    # later SOURCES as root. Without this, "fanctl guard '$(anything)'" is
+    # arbitrary command execution on the next apply. Only a plain decimal
+    # number in a sane range is accepted.
+    case $2 in
+      ''|*[!0-9.]*)
+        echo "fanctl: guard needs a number in degrees C, got '$2'" >&2; exit 1 ;;
+      *.*.*)
+        echo "fanctl: guard needs a single number, got '$2'" >&2; exit 1 ;;
+    esac
+    # integer part must fit well inside 64-bit signed, or the comparison in the
+    # guard loop wraps and the guard silently never fires
+    ip=${2%%.*}
+    if [ "${#ip}" -gt 3 ] || [ "$ip" -gt 200 ]; then
+      echo "fanctl: guard temperature out of range: $2 (expected 0-200 C)" >&2
+      exit 1
+    fi
+    GUARD_TEMP=$2
+    save_conf "GUARD_TEMP=$GUARD_TEMP"
+  fi
   # Re-arm at whatever threshold matches the CURRENT mode. Lowering the fan to
   # nothing while leaving a guard armed for 85 C would be the dangerous state.
   cur=$(getb $F_TGT)
@@ -231,7 +442,10 @@ guard)
 
 onac|ondc)
   p=$2
-  case $p in auto) ;; *) [ -n "${PROFILE[$p]:-}" ] || { echo "fanctl: unknown profile '$p'" >&2; exit 1; } ;; esac
+  # Empty subscript is a bash error, not a message; "fanctl ondc" with no
+  # argument hits it.
+  [ -n "$p" ] || { echo "fanctl: $1 needs a profile, e.g. 'fanctl $1 quiet' (try: fanctl list)" >&2; exit 1; }
+  case $p in auto) ;; *) [ -n "${PROFILE[$p]:-}" ] || { echo "fanctl: unknown profile '$p' (try: fanctl list)" >&2; exit 1; } ;; esac
   mkdir -p "$(dirname "$CONF")"
   key=$([ "$1" = onac ] && echo ONAC || echo ONDC)
   [ -f "$CONF" ] || : > "$CONF"
@@ -244,10 +458,31 @@ onac|ondc)
 
 apply)
   [ -f "$CONF" ] || { echo "fanctl: no $CONF - use 'fanctl onac <profile>' first" >&2; exit 1; }
-  . "$CONF"
+  # DO NOT ". $CONF" here. Sourcing a config file as root turns any value that
+  # ever landed in it into shell code. Instead, parse it with strict pattern
+  # matching: only a line of exactly KEY=value where value is a known profile
+  # name or auto is honoured, and anything else is ignored.
+  conf_get(){
+    sed -n "s/^$1=//p" "$CONF" 2>/dev/null | tail -n1
+  }
+  ONAC=$(conf_get ONAC); ONDC=$(conf_get ONDC)
+  for v in "$ONAC" "$ONDC"; do
+    case $v in
+      ''|auto) ;;
+      off|silent|quiet|balanced|performance|max) ;;
+      *) echo "fanctl: ignoring unrecognised profile '$v' in $CONF" >&2 ;;
+    esac
+  done
   src=$(acst)
   [ "$src" = AC ] && p=${ONAC:-} || p=${ONDC:-}
   [ -n "$p" ] || { echo "fanctl: no profile configured for $src" >&2; exit 1; }
+  # Validate again at the point of use, not just on read. A hand-edited or
+  # corrupted config must not be able to name a profile that does not exist.
+  case $p in
+    off|silent|quiet|balanced|performance|max) ;;
+    auto) ;;
+    *) echo "fanctl: refusing to apply unknown profile '$p' from $CONF" >&2; exit 1 ;;
+  esac
   if [ "$p" = auto ]; then
     to_auto || exit 1; stop_guard
     echo "  $src -> auto (firmware curve)"
@@ -280,5 +515,16 @@ usage)
   CPU temperature and releases to auto if you command a speed the machine
   cannot run at.
 EOF
+  ;;
+
+*)
+  # A case statement with no default falls through silently: "fanctl silnet"
+  # (a typo) or "fanctl --help" would print nothing, change nothing, and exit 0.
+  # A tool that reports success for a command it did not understand is worse
+  # than one that complains, because the user believes the fan is set the way
+  # they asked and it is not.
+  echo "fanctl: unknown command '$1'." >&2
+  echo "       Run 'fanctl list' for the profiles, or 'fanctl usage' for all commands." >&2
+  exit 1
   ;;
 esac
