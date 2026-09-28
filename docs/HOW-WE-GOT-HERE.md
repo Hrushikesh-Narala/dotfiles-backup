@@ -197,6 +197,59 @@ Then the whole range, and the low end specifically:
     30  -> 3000 RPM     reached
     59  -> 5900 RPM     reached
 
+## fan-off, and a bad measurement of it
+
+A commanded `0` genuinely stops the fan. This was confirmed by hand on the
+exhaust, not by a register - `0x811` reads `0` whether the blades are stopped
+or spinning at 3600, so it cannot answer the question, and both hwmon fan
+inputs are dead.
+
+Getting there involved the worst measurement in the whole project. The first
+attempt compared temperature rise at 1200 RPM against temperature rise at 0,
+and reported "indistinguishable, so the fan probably never stopped". That
+verdict was wrong twice over:
+
+**The A/B was invalid.** The baseline phase ran first and heated the machine
+from 56.5 C to 62.6 C. The "off" phase then started at 61.1 C and finished at
+62.8 C. Its `+1.7 C` rise was measured against a starting point 4.6 C hotter
+than the baseline's, so the two numbers were never comparable. The phase was
+really testing "an already-warm machine", not "a stopped fan".
+
+**The conclusion contradicted the evidence.** The trajectory under load was
+`... 64.4 64.6 64.8 64.6 64.1 63.8 63.5` - temperature *falling* while two
+cores were loaded. With the fan genuinely off, heat can only accumulate, so a
+fall meant something else was cooling. The registers still read
+`latched=9 target=0x00`, so the EC had not touched our command, and I inferred
+that the EC's thermal logic had overridden us internally.
+
+That inference was unsupported, and the correction offered - CPU power
+throttling - was no better: the machine reported 99% of max frequency
+afterwards and exposed no throttle counters, so that explanation was
+unsubstantiated too. The honest position is that the temperature fall is
+unexplained. What is not in doubt is that the fan physically stopped, because
+a hand was on the exhaust.
+
+The lesson is the same one from the `FNSW` latch, in a different costume:
+a single ambiguous number produced a confident theory, and the theory was
+acted on before the measurement that would have tested it. A falling
+temperature under load is a signal to investigate, not to conclude from.
+
+`tests/fanoff` replaces the invalid A/B: it establishes a genuine cold
+baseline, then runs one phase with the fan stopped, reporting the whole
+trajectory against the abort temperature. It never leaves a commanded `0`
+in place, aborts at 70 C, and detects the EC reclaiming the command by
+checking the latch as well as the target - an EC that reclaims by clearing
+`FNSW` leaves the target register untouched, so a target-only check would
+miss it entirely.
+
+`fanctl off` guards this state more tightly than the other profiles: a
+stopped fan arms the thermal guard at 70 C rather than 85, `fanctl guard`
+re-arms at whichever threshold matches the current mode, and `fanctl status`
+prints a warning if it ever finds a commanded `0` with no guard running. That
+combination - fan stopped, no cooling, no guard - is the one genuinely
+destructive state available through this interface, so it is the one the tool
+refuses to sit in quietly.
+
 One earlier reading of 1200 RPM had come back as "peak 5900" and looked like a
 failure. It was a measurement artefact: the metric was a 4-second *peak*, and
 the fan had not finished spinning down from the previous step. A peak cannot

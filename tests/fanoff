@@ -1,0 +1,151 @@
+#!/usr/bin/env bash
+# fanoff - measure how hot the machine actually gets with the fan stopped.
+#
+# WHY THIS EXISTS
+#
+# A commanded 0 does genuinely stop the fan - confirmed by hand on the exhaust,
+# which is the only trustworthy sensor on this machine. But we do not know how
+# hot the laptop gets before that becomes a problem, because no earlier test
+# measured it properly: the two phases started at different temperatures, so
+# their "rise" figures were not comparable.
+#
+# This runs ONE phase - fan commanded to 0 - from a cold start, and reports the
+# temperature trajectory against CPU utilisation. That answers the only question
+# that matters for a usable threshold: at what CPU temperature do we want the
+# guard to release the fan?
+#
+# It deliberately does NOT try to find the point where the machine damages
+# itself. It ramps to a bounded temperature and stops, because the useful
+# output is "at 60 C this is fine", not "here is where it breaks".
+#
+# Two things are measured, because they answer different questions:
+#   1. idle with the fan stopped   - is it stable when doing nothing?
+#   2. light sustained load        - how fast does it climb, and does the
+#                                    guard fire before the hard limit?
+#
+# HARD SAFETY: aborts to the firmware curve at ABORT_TEMP (70 C by default,
+# matching fanctl's off threshold), on any reclaim of the command, or on
+# Ctrl-C. Never leaves a commanded 0 in place.
+
+set -u
+BASE=$((0xFE0B0000)); OFF=$((0x800))
+K10=/sys/class/hwmon/hwmon6/temp1_input
+F_FLAGS=0x0F; F_TGT=0x14; FNSW=0x08
+IDLE_SECS=${IDLE_SECS:-40}
+LOAD_SECS=${LOAD_SECS:-40}
+LOAD_JOBS=${LOAD_JOBS:-2}
+ABORT_TEMP=${ABORT_TEMP:-70}
+
+[ "$(id -u)" = 0 ] || { echo "must be root" >&2; exit 1; }
+[ -r "$K10" ] || { echo "no k10temp at $K10" >&2; exit 1; }
+
+getb(){ local v; v=$(dd if=/dev/mem bs=1 skip=$((BASE+OFF+$1)) count=1 status=none 2>/dev/null|od -An -tx1 -v|tr -d ' \n')
+         case $v in ''|*[!0-9a-fA-F]*) echo -1 ;; *) echo $(( 16#$v )) ;; esac; }
+putb(){ printf "\\$(printf '%03o' "$2")" | dd of=/dev/mem bs=1 seek=$((BASE+OFF+$1)) conv=notrunc status=none; }
+cput(){ awk -v m="$(cat "$K10")" 'BEGIN{printf "%.1f",m/1000}'; }
+acst(){ local p; for p in /sys/class/power_supply/AC*/online; do
+          [ -r "$p" ] && [ "$(cat "$p")" = 1 ] && { echo AC; return; }; done; echo DC; }
+held(){ # is our command still in force?
+  [ "$(getb $F_TGT)" = 0 ] && [ $(( $(getb $F_FLAGS) & FNSW )) -ne 0 ]
+}
+ORIG_FLAGS=$(getb $F_FLAGS); ORIG_TGT=$(getb $F_TGT)
+LOADPID=""
+kill_load(){ [ -n "$LOADPID" ] && kill -- -"$LOADPID" 2>/dev/null; LOADPID=""; }
+restore(){ kill_load; local f; f=$(getb $F_FLAGS); putb $F_FLAGS $(( f & ~FNSW )); putb $F_TGT "$ORIG_TGT"; }
+trap 'echo; echo "[interrupted - releasing to firmware curve]"; restore; exit 130' INT TERM
+trap 'restore' EXIT
+
+watch(){ # watch <label> <seconds> -> sets PEAK, prints trajectory
+  local label=$1 secs=$2 i t traj="" peak=0
+  while [ "$i" -lt "$secs" ]; do
+    sleep 1; i=$(( i + 1 ))
+    t=$(cput); traj="$traj $t"
+    awk -v t="$t" -v p="$peak" 'BEGIN{exit !(t>p)}' && peak=$t
+    if awk -v t="$t" -v l="$ABORT_TEMP" 'BEGIN{exit !(t>=l)}'; then
+      echo "  reached ${t}C (limit ${ABORT_TEMP}C) - stopping here"
+      PEAK=$t; TRAJ="$traj"; return 2
+    fi
+    if ! held; then
+      echo "  the EC took the command back - stopping"
+      PEAK=$t; TRAJ="$traj"; return 3
+    fi
+  done
+  PEAK=$peak; TRAJ="$traj"; return 0
+}
+
+echo
+echo "=== fan-off: how warm does it actually get? ==="
+echo "  The fan is commanded to 0 and stays latched. Temperature is the sensor:"
+echo "  0x811 echoes the command and both hwmon fan inputs are dead, so airflow"
+echo "  can only be verified by hand or inferred from heat behaviour."
+echo
+printf '  idle %ds, then load %ds on %d cores. Abort at %d C.\n' \
+  "$IDLE_SECS" "$LOAD_SECS" "$LOAD_JOBS" "$ABORT_TEMP"
+echo "  machine: $(acst)"
+
+# start from a genuinely cool baseline so the numbers mean something
+echo
+echo "=== cooling down to establish a cold baseline ==="
+restore
+i=0
+while [ "$i" -lt 60 ]; do
+  t=$(cput)
+  [ "${t%.*}" -lt 48 ] 2>/dev/null && break
+  sleep 5; i=$(( i + 5 ))
+  [ "$i" -ge 60 ] && { echo "  (never got under 48 C, starting from ${t} C anyway)"; break; }
+done
+COLD=$(cput)
+echo "  cold baseline: ${COLD} C"
+
+echo
+echo "=== phase 1: fan OFF, idle ==="
+f=$(getb $F_FLAGS); putb $F_FLAGS $(( f | FNSW )); putb $F_TGT 0
+echo "  latched=0x$(printf '%02X' "$(getb $F_FLAGS)")  target=0x$(printf '%02X' "$(getb $F_TGT)")  start $(cput) C"
+watch "idle" "$IDLE_SECS"; rc=$?
+echo "  trajectory:$TRAJ"
+if [ "$rc" -eq 2 ]; then
+  echo
+  echo "  It reached the abort temperature while sitting at idle with the fan"
+  echo "  stopped. That means fan-off is not viable for idle use at all, and no"
+  echo "  threshold short of 'always on' would be honest."
+elif [ "$rc" -eq 3 ]; then
+  echo "  The EC reclaimed the command during idle, so the firmware protects"
+  echo "  against a stopped fan on its own."
+else
+  IDLE_RISE=$(awk -v a="$COLD" -v b="$PEAK" 'BEGIN{printf "%+.1f",b-a}')
+  echo "  idle peak ${PEAK} C   drift from cold ${IDLE_RISE} C"
+fi
+
+echo
+echo "=== phase 2: fan OFF, ${LOAD_JOBS} cores for ${LOAD_SECS}s ==="
+T0=$(cput)
+echo "  start ${T0} C"
+if command -v stress-ng >/dev/null; then
+  setsid stress-ng --cpu "$LOAD_JOBS" --cpu-method matrixprod --timeout "${LOAD_SECS}s" >/dev/null 2>&1 &
+  LOADPID=$!
+  sleep 2
+else
+  echo "  (stress-ng missing - idling instead, so the numbers will be pessimistic)"
+fi
+watch "load" "$LOAD_SECS"; rc=$?
+kill_load; sleep 2
+echo "  trajectory:$TRAJ"
+case $rc in
+  2) echo; echo "  Hit ${ABORT_TEMP} C under load with the fan stopped."
+     echo "  That is the number the guard has to beat." ;;
+  3) echo; echo "  The EC reclaimed the command under load - the firmware's own"
+     echo "  thermal protection overrode us. Fan-off would be bounded by that." ;;
+  *) LOAD_RISE=$(awk -v a="$T0" -v b="$PEAK" 'BEGIN{printf "%+.1f",b-a}')
+     echo "  load peak ${PEAK} C   rise ${LOAD_RISE} C" ;;
+esac
+
+echo
+echo "=== restoring firmware curve ==="
+restore; sleep 2
+printf '  latched=0x%s  target=0x%s  CPU %s C\n' "$(getb $F_FLAGS)" "$(getb $F_TGT)" "$(cput)"
+echo
+echo "Recommended reading of this data:"
+echo "  fanctl uses ${ABORT_TEMP} C as the off threshold. If the load phase"
+echo "  peaked well under that, off is usable for short bursts. If it hit the"
+echo "  limit, the threshold is too high and should come down."
+echo

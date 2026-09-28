@@ -29,6 +29,10 @@ K10=/sys/class/hwmon/hwmon6/temp1_input
 GUARDPID=/run/fanctl.guard
 CONF=/etc/fanctl.conf
 GUARD_TEMP=85
+# "off" is the one mode with no cooling at all, so it gets a much lower trip
+# point than the ordinary profiles. 85 C is fine when the fan is still moving
+# air; it is not fine with the blades stopped.
+OFF_GUARD_TEMP=70
 
 F_FLAGS=0x0F
 F_TGT=0x14
@@ -37,8 +41,9 @@ F_MINR=0x13
 F_RPM=0x11
 FNSW_BIT=0x08
 
-declare -A PROFILE=( [silent]=12 [quiet]=20 [balanced]=30 [performance]=42 [max]=59 )
+declare -A PROFILE=( [off]=0 [silent]=12 [quiet]=20 [balanced]=30 [performance]=42 [max]=59 )
 declare -A PDESC=(
+  [off]="fan stopped - guard trips at ${OFF_GUARD_TEMP}C, see warning below"
   [silent]="barely audible, for cool workloads"
   [quiet]="library and office work"
   [balanced]="everyday default"
@@ -90,15 +95,22 @@ to_auto(){
 }
 
 stop_guard(){ [ -f "$GUARDPID" ] && kill "$(cat "$GUARDPID")" 2>/dev/null; rm -f "$GUARDPID"; }
+
+# start_guard [trip-temp]
+#
+# Detaches a watcher that releases the fan to the firmware curve when the CPU
+# reaches the trip point. The trip point is an argument, not a global, because
+# "off" needs a much lower one than the ordinary profiles and must not inherit
+# whatever /etc/fanctl.conf happens to say.
 start_guard(){
-  [ -f "$CONF" ] && . "$CONF" 2>/dev/null
-  [ -n "${GUARD_TEMP:-}" ] || GUARD_TEMP=85
+  local trip=${1:-$GUARD_TEMP}
+  [ "$trip" = 0 ] && { stop_guard; return 0; }
   stop_guard
   ( while :; do
       t=$(cput)
       case $t in ''|*[!0-9.]*) ;; *)
-        if awk -v t="$t" -v l="$GUARD_TEMP" 'BEGIN{exit !(t>=l)}'; then
-          logger -t fanctl "thermal guard tripped at ${t}C - releasing fan to firmware curve"
+        if awk -v t="$t" -v l="$trip" 'BEGIN{exit !(t>=l)}'; then
+          logger -t fanctl "thermal guard tripped at ${t}C (threshold ${trip}C) - releasing fan to firmware curve"
           "$0" auto >/dev/null 2>&1
           exit 0
         fi ;;
@@ -106,6 +118,7 @@ start_guard(){
     sleep 2
   done ) >/dev/null 2>&1 &
   echo $! > "$GUARDPID"
+  echo "$trip" > "$GUARDPID.trip"
 }
 
 show(){
@@ -121,8 +134,19 @@ show(){
   printf '  limits %d..%d RPM commanded;  FNMX=%d FNMN=%d\n' 0 "$(( maxr * 100 ))" "$maxr" "$minr"
   printf '  flags  0x%02X  FANE=%d FNSW=%d WPFM=%d\n' "$f" $(( f & 1 )) $(( (f >> 3) & 1 )) $(( (f >> 6) & 1 ))
   printf '  temp   %s C      power %s\n' "$(cput)" "$(acst)"
-  [ -f "$GUARDPID" ] && printf '  guard  armed at %s C (pid %s)\n' "$GUARD_TEMP" "$(cat "$GUARDPID")" \
-                     || printf '  guard  disarmed\n'
+  if [ -f "$GUARDPID" ]; then
+    # the guard writes its own trip point back, so status is truthful even when
+    # the trip came from "off" rather than the configured default
+    local trip; trip=$(cat "$GUARDPID.trip" 2>/dev/null)
+    printf '  guard  armed at %s C (pid %s)\n' "${trip:-$GUARD_TEMP}" "$(cat "$GUARDPID")"
+  else
+    printf '  guard  disarmed\n'
+  fi
+  # a commanded 0 with no guard is the one genuinely dangerous state
+  if [ "$tgt" -eq 0 ] && [ $(( f & FNSW_BIT )) -ne 0 ] && [ ! -f "$GUARDPID" ]; then
+    printf '\n  WARNING: fan is stopped AND the thermal guard is not running.\n'
+    printf '  Run "fanctl off" to re-arm it, or "fanctl auto" to start the fan.\n\n'
+  fi
   printf '\n  note: the RPM figure is the EC commanded value, not a tach reading.\n\n'
 }
 
@@ -135,7 +159,7 @@ status|"")
 list)
   printf '\n  profile        RPM   flag    meaning\n'
   printf '  -----------    ----   ----    ------------------------------\n'
-  for p in silent quiet balanced performance max; do
+  for p in off silent quiet balanced performance max; do
     printf '  %-12s  %5d   %-6s  %s\n' "$p" "$(( ${PROFILE[$p]} * 100 ))" "" "${PDESC[$p]}"
   done
   printf '  %-12s  %5s   %-6s  %s\n' "manual <rpm>" "any" "" "hold an explicit speed"
@@ -143,9 +167,11 @@ list)
   printf '  %-12s  %5s   %-6s  %s\n' "onac <prof>" "-" "" "apply when on mains"
   printf '  %-12s  %5s   %-6s  %s\n' "ondc <prof>" "-" "" "apply when on battery"
   printf '  %-12s  %5s   %-6s  %s\n\n' "guard [degC]" "85" "" "auto-revert threshold"
+  printf '  Note: "off" is not a normal profile. It stops the fan, and the guard\n'
+  printf '  for it trips at %s C rather than 85. See "fanctl off".\n\n' "$OFF_GUARD_TEMP"
   ;;
 
-set|manual|custom|silent|quiet|balanced|performance|max)
+set|manual|custom|off|silent|quiet|balanced|performance|max)
   if [ "$1" = set ]; then p=$2; arg=$3; else p=$1; arg=$2; fi
   if [ "$p" = manual ] || [ "$p" = custom ]; then
     case ${arg:-} in ''|*[!0-9]*) echo "fanctl: manual needs an RPM value: fanctl manual 2500" >&2; exit 1 ;; esac
@@ -158,6 +184,19 @@ set|manual|custom|silent|quiet|balanced|performance|max)
   # the EC's own FNMX is the ceiling; commanding past it is at best ignored
   ceiling=$(getb $F_MAXR); clamped=0
   if [ "$ceiling" -gt 0 ] && [ "$units" -gt "$ceiling" ]; then units=$ceiling; clamped=1; fi
+
+  # "off" stops the fan outright, so it gets its own lower trip point and a
+  # warning rather than the silent treatment the other profiles get.
+  if [ "$units" -eq 0 ]; then
+    printf '\n  fan OFF: no cooling at all. The thermal guard releases this to the\n'
+    printf '  firmware curve at %s C. Do not run sustained heavy load in this mode.\n' "$OFF_GUARD_TEMP"
+    printf '  Raise the threshold with "fanctl guard <degC>" if you know what you are doing.\n\n'
+    command_units 0 || exit 1
+    start_guard "$OFF_GUARD_TEMP"
+    sleep 1; show
+    exit 0
+  fi
+
   command_units "$units" || exit 1
   start_guard
   if [ "$clamped" = 1 ]; then
@@ -178,8 +217,16 @@ auto)
 guard)
   [ -n "$2" ] && GUARD_TEMP=$2
   save_conf "GUARD_TEMP=$GUARD_TEMP"
-  start_guard
-  echo "  thermal guard armed: release to auto at >= ${GUARD_TEMP}C"
+  # Re-arm at whatever threshold matches the CURRENT mode. Lowering the fan to
+  # nothing while leaving a guard armed for 85 C would be the dangerous state.
+  cur=$(getb $F_TGT)
+  if [ "$cur" -eq 0 ] && [ $(( $(getb $F_FLAGS) & FNSW_BIT )) -ne 0 ]; then
+    start_guard "$OFF_GUARD_TEMP"
+    echo "  fan is currently stopped - guard armed at the low threshold ${OFF_GUARD_TEMP}C, not ${GUARD_TEMP}C"
+  else
+    start_guard
+    echo "  thermal guard armed: release to auto at >= ${GUARD_TEMP}C"
+  fi
   ;;
 
 onac|ondc)
@@ -205,7 +252,9 @@ apply)
     to_auto || exit 1; stop_guard
     echo "  $src -> auto (firmware curve)"
   else
-    command_units "${PROFILE[$p]}" || exit 1; start_guard
+    command_units "${PROFILE[$p]}" || exit 1
+    # same rule as the set path: a stopped fan gets the low trip point
+    if [ "${PROFILE[$p]}" -eq 0 ]; then start_guard "$OFF_GUARD_TEMP"; else start_guard; fi
     echo "  $src -> $p ($(( ${PROFILE[$p]} * 100 )) RPM)"
   fi
   show
@@ -216,7 +265,7 @@ usage)
   fanctl - fan profiles for HP Envy x360 13-ay (board 8929)
 
     fanctl list                 show the profiles
-    fanctl <profile>            apply one (silent/quiet/balanced/performance/max)
+    fanctl <profile>            apply one (off/silent/quiet/balanced/performance/max)
     fanctl manual <rpm>         hold an explicit speed, e.g. fanctl manual 2500
     fanctl auto                 release to the firmware temperature curve
     fanctl status               what is commanded right now

@@ -36,6 +36,7 @@ Requirements: root, `lockdown=off` (currently `[none]`). Nothing else. No
 | Command                  | Effect                                            |
 |--------------------------|---------------------------------------------------|
 | `fanctl list`            | show the profiles                                 |
+| `fanctl off`             | **fan stopped** - guard trips at 70 °C, not 85    |
 | `fanctl silent`          | 1200 RPM                                          |
 | `fanctl quiet`           | 2000 RPM                                          |
 | `fanctl balanced`        | 3000 RPM                                          |
@@ -86,7 +87,15 @@ this machine - both hwmon fan inputs are permanently 0. The only ground truth
 is a hand on the exhaust. The tools label this rather than printing an
 unmarked number.
 
-**`0` means "no command", not "stop."** A latched `0` behaves like `auto`.
+**`off` stops the fan, and it is not a normal profile.** A latched `0`
+genuinely halts the blades - confirmed by hand on the exhaust, which is the
+only trustworthy sensor available here, since `0x811` merely echoes the
+command. Because there is no cooling at all, `off` does not use the ordinary
+85 °C guard threshold. It arms at **70 °C**, and `fanctl status` shouts if it
+ever finds a stopped fan with no guard running. The threshold is a measured
+guess, not a validated one: `sudo tests/fanoff` measures how warm the machine
+actually gets, and if the load phase peaks well under 70 °C then `off` is fine
+for short bursts, while if it hits the limit the threshold needs to come down.
 
 **The latch outlives the process.** That is what makes profiles work, and it
 also means a bad command persists until something clears it. Hence the thermal
@@ -123,8 +132,9 @@ sudo tests/run-all
 |-------------|-----------------------------------------------------------------|
 | `fanlatch`  | `FNSW` is a latch: same target, released vs latched, must disagree |
 | `fantail`   | The low end of the range is reachable, with settle time         |
+| `fanoff`    | How warm the machine actually gets with the fan stopped         |
 | `fansweep`  | Sweeps flag combinations. Interactive; re-derives the mechanism  |
-| `run-all`   | Runs the two non-interactive ones, restores state between them   |
+| `run-all`   | Runs the non-interactive ones, restores state between them      |
 
 All of them restore the firmware curve on exit, including on Ctrl-C, and all
 of them need root. Run them one at a time - they share one fan.
