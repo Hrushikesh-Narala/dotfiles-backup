@@ -1,0 +1,20 @@
+# Build artefacts - never commit these.
+# The .ko is kernel-version specific: it only loads on the exact kernel it was
+# built against, so committing it is actively misleading. Rebuild instead.
+*.ko
+*.o
+*.mod
+*.mod.c
+.*.cmd
+.*.o.cmd
+modules.order
+Module.symvers
+.tmp_versions/
+
+# Runtime state
+fanctl.conf
+*.log
+
+# Editor noise
+*~
+.*.swp

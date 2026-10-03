@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+# fanlatch - prove whether FNSW is a latch or a write strobe, then walk the
+# profile ladder with the winning method.
+#
+# Why this exists: fansweep left FNSW set while sampling and every target
+# responded. fanctl set and released it around the write and nothing happened.
+# That difference is the whole question, so test it directly: same target,
+# same flags, only the release differs.
+#
+# Restores the firmware curve on exit, including on Ctrl-C.
+
+set -u
+BASE=$((0xFE0B0000)); OFF=$((0x800)); ACPI=/proc/acpi/call
+K10=/sys/class/hwmon/hwmon6/temp1_input
+F_FLAGS=0x0F; F_TGT=0x14; FNSW=0x08
+
+[ "$(id -u)" = 0 ] || { echo "must be root" >&2; exit 1; }
+
+getb(){ local v; v=$(dd if=/dev/mem bs=1 skip=$((BASE+OFF+$1)) count=1 status=none 2>/dev/null|od -An -tx1 -v|tr -d ' \n')
+         case $v in ''|*[!0-9a-fA-F]*) echo -1 ;; *) echo $(( 16#$v )) ;; esac; }
+putb(){ printf "\\$(printf '%03o' "$2")" | dd of=/dev/mem bs=1 seek=$((BASE+OFF+$1)) conv=notrunc status=none; }
+rpm(){ printf '%s\n' '\\_TZ.TSZ0.FRSP' > "$ACPI" 2>/dev/null
+       local v; v=$(cat "$ACPI" 2>/dev/null|tr '\000' '\n'|head -n1|tr -cd '[:print:]')
+       [[ $v =~ ^0x ]] && echo $(( v )) || echo -1; }
+cput(){ [ -r "$K10" ] && awk -v m="$(cat "$K10")" 'BEGIN{printf "%.1f",m/1000}' || echo '?'; }
+acst(){ local p; for p in /sys/class/power_supply/AC*/online; do
+          [ -r "$p" ] && [ "$(cat "$p")" = 1 ] && { echo AC; return; }; done; echo DC; }
+
+ORIG_FLAGS=$(getb $F_FLAGS); ORIG_TGT=$(getb $F_TGT)
+to_auto(){ local f; f=$(getb $F_FLAGS); putb $F_FLAGS $(( f & ~FNSW )); }
+restore(){ to_auto; putb $F_TGT "$ORIG_TGT"; }
+trap 'echo; echo "[interrupted - releasing to firmware curve]"; restore; exit 130' INT TERM
+trap 'restore' EXIT
+
+# sample <label> <n> - peak fan reading over n seconds
+sample(){ local label=$1 n=$2 i p=0 c
+  for (( i=0; i<n; i++ )); do
+    c=$(rpm); [ "$c" -gt "$p" ] 2>/dev/null && p=$c
+    sleep 1
+  done
+  printf '  %-40s peak %5d RPM\n' "$label" "$p"
+}
+
+echo
+echo "=== baseline ==="
+printf '  flags 0x%02X (FNSW=%d)  target 0x%02X  fan %d RPM  CPU %s C  %s\n' \
+  "$ORIG_FLAGS" $(( (ORIG_FLAGS >> 3) & 1 )) "$ORIG_TGT" "$(rpm)" "$(cput)" "$(acst)"
+
+echo
+echo "=== A/B: same target 0x3B (5900 RPM), only FNSW release differs ==="
+to_auto; sleep 2
+b0=$(rpm)
+printf '  released (FNSW cleared after write)   baseline %5d RPM\n' "$b0"
+
+f=$(getb $F_FLAGS)
+putb $F_FLAGS $(( f | FNSW )); putb $F_TGT 0x3B; putb $F_FLAGS "$f"   # set and release
+sample "released -> expected to be ignored" 5
+printf '    (FNSW is %d now)\n' $(( ($(getb $F_FLAGS) >> 3) & 1 ))
+
+f=$(getb $F_FLAGS)
+putb $F_FLAGS $(( f | FNSW )); putb $F_TGT 0x3B                      # latch, do not release
+sample "LATCHED (FNSW left set)" 5
+printf '    (FNSW is %d now)\n' $(( ($(getb $F_FLAGS) >> 3) & 1 ))
+
+echo
+echo "=== profile ladder, latched ==="
+for u in 12 20 30 42 59; do
+  f=$(getb $F_FLAGS)
+  putb $F_FLAGS $(( f | FNSW )); putb $F_TGT "$u"
+  sample "$(( u * 100 )) RPM (0x$(printf '%02X' $u))" 4
+done
+
+echo
+echo "=== back to firmware curve ==="
+restore
+sleep 1
+printf '  flags 0x%02X (FNSW=%d)  fan %d RPM\n' "$(getb $F_FLAGS)" $(( ($(getb $F_FLAGS) >> 3) & 1 )) "$(rpm)"
+echo

@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+# fanrpm-display - check that fanrpm never lies about a number.
+#
+# fanrpm is read-only, so it cannot hurt the machine, but it can still mislead:
+# a failed register read used to reach the screen as "-100 RPM", and an
+# unreadable flags byte produced a confident "FANE=1 FNSW=1 WPFM=1". Both look
+# like measurements. This drives the real script against a fake EC in a user
+# namespace, so it needs no root and no hardware.
+
+set -uo pipefail
+HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+ROOT=$(mktemp -d /tmp/fanrpm-test.XXXXXX)
+trap 'rm -rf "$ROOT"' EXIT
+ECOFF=$((0xFE0B0000 + 0x800))
+IMG=$ROOT/ec.img
+
+pass=0; fail=0
+ok(){ printf '  \033[32mok\033[0m    %s\n' "$1"; pass=$((pass+1)); }
+bad(){ printf '  \033[31mFAIL\033[0m  %s\n' "$1"; fail=$((fail+1)); }
+
+mkec(){ truncate -s $((ECOFF+0x40)) "$IMG"
+        printf "$1" | dd of="$IMG" bs=1 seek=$((ECOFF+0x11)) conv=notrunc status=none
+        printf "$2" | dd of="$IMG" bs=1 seek=$((ECOFF+0x12)) conv=notrunc status=none
+        printf "$3" | dd of="$IMG" bs=1 seek=$((ECOFF+0x13)) conv=notrunc status=none
+        printf "$4" | dd of="$IMG" bs=1 seek=$((ECOFF+0x14)) conv=notrunc status=none
+        printf "$5" | dd of="$IMG" bs=1 seek=$((ECOFF+0x0F)) conv=notrunc status=none; }
+
+echo 52000 > "$ROOT/temp1_input"
+
+# Only the root check is relaxed; the read path is the shipped code.
+sed -e "s#/dev/mem#$IMG#g" -e 's#^\[ "\$(id -u)" = 0 \].*#: #' "$HERE/../bin/fanrpm" > "$ROOT/fanrpm"
+chmod +x "$ROOT/fanrpm"
+sed "s#$IMG#$ROOT/absent#g" "$ROOT/fanrpm" > "$ROOT/fanrpm_gone"
+chmod +x "$ROOT/fanrpm_gone"
+
+once(){ unshare -r env K10="$ROOT/temp1_input" "$1" --once 2>&1; }
+
+echo
+echo "=== 1. a readable EC reports the register value ==="
+mkec '\x2b' '\x3b' '\x30' '\x19' '\x09'     # FRSP 4300, FNMX 5900, FNMN 4800, target 2500, flags 0x09
+out=$(once "$ROOT/fanrpm")
+echo "$out" | sed 's/^/  | /'
+echo "$out" | grep -q '4300 RPM' && ok "fan RPM shown as 4300" || bad "expected 4300 RPM"
+echo "$out" | grep -q '4800-5900 RPM' && ok "range shown with units" || bad "range missing or wrong"
+echo "$out" | grep -q 'CPU 5[0-9]\.[0-9] C' && ok "CPU temperature shown in C" || bad "CPU temp missing or unlabelled"
+
+echo
+echo "=== 2. an absent EC says 'unreadable', never a negative number ==="
+out=$(once "$ROOT/fanrpm_gone")
+echo "$out" | sed 's/^/  | /'
+echo "$out" | grep -q -- '-[0-9]' && bad "a negative number reached the screen" \
+  || ok "no negative numbers displayed"
+echo "$out" | grep -qi 'unreadable' && ok "the failure is labelled 'unreadable'" || bad "no unreadable label"
+echo "$out" | grep -qi 'integer expected\|command not found\|syntax error' \
+  && bad "a raw shell error leaked to the screen" || ok "no shell errors leaked"
+
+echo
+echo "=== 3. the live view agrees, and its flag line does not invent state ==="
+out=$(unshare -r env K10="$ROOT/temp1_input" timeout -s TERM 3 "$ROOT/fanrpm_gone" 2>&1 \
+      | sed 's/\x1b\[[0-9]*[A-Za-z]//g')
+echo "$out" | grep -q -- '-[0-9]' && bad "a negative number reached the live view" \
+  || ok "live view shows no negative numbers"
+echo "$out" | grep -q 'FANE=1 FNSW=1 WPFM=1' \
+  && bad "flags derived from an unreadable byte were displayed as real state" \
+  || ok "flags line does not claim FANE/FNSW/WPFM from an unreadable byte"
+echo "$out" | grep -q 'flags  0x80F       : unreadable' \
+  && ok "flags line reports 'unreadable'" || bad "flags line did not report the failure"
+
+echo
+echo "=== 4. a readable flags byte is decoded correctly ==="
+mkec '\x2b' '\x3b' '\x30' '\x19' '\x09'
+out=$(unshare -r env K10="$ROOT/temp1_input" timeout -s TERM 3 "$ROOT/fanrpm" 2>&1 \
+      | sed 's/\x1b\[[0-9]*[A-Za-z]//g')
+echo "$out" | grep -q '0x09  FANE=1 FNSW=1 WPFM=0' \
+  && ok "0x09 decodes to FANE=1 FNSW=1 WPFM=0" || bad "flags decode wrong"
+
+echo
+echo "=== 5. a missing CPU sensor degrades instead of breaking ==="
+rm -f "$ROOT/temp1_input"
+out=$(once "$ROOT/fanrpm")
+echo "$out" | grep -q 'CPU ? C' && ok "missing sensor shows '?', the rest still works" \
+  || bad "missing sensor broke the display: $out"
+
+echo
+if [ "$fail" -eq 0 ]; then echo "=== all fanrpm display checks passed ==="; else echo "=== $fail FAILED ==="; fi
+[ "$fail" -eq 0 ]

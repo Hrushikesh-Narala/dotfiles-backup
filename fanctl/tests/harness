@@ -1,0 +1,357 @@
+#!/usr/bin/env bash
+# harness - run the REAL bin/fanctl against a fake EC. No hardware touched.
+#
+# The point is to test the code that ships, not a reimplementation of it. Two
+# strings are rewritten in the copy under test, and only these two:
+#     /dev/mem  -> a scratch image file
+#     the root check  -> satisfied by `unshare -r`, which does not run as root
+#                       in the parent namespace, so the check has to be relaxed
+# All argument parsing, validation, clamping, control flow and the EC write
+# sequence are the shipped code, unmodified.
+#
+# Every path that writes state is redirected into a temp tree via env vars the
+# script already reads (MEM, CONF, GUARDPID, K10, LOCK, PWRDIR), so /etc and
+# /run are never hit.
+
+set -u
+ROOT=$(mktemp -d /tmp/fanctl-harness.XXXXXX)
+# Clean up on any exit, including Ctrl-C and a failing check. A test that
+# leaves a multi-gigabyte sparse file and a live guard process behind is worse
+# than no test, and this one spawns real background guards.
+cleanup(){
+  local p
+  p=$(cat "$ROOT/run/fanctl.guard" 2>/dev/null)
+  [ -n "$p" ] && kill "$p" 2>/dev/null
+  rm -rf "$ROOT"
+}
+trap cleanup EXIT INT TERM
+SRC=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)/bin/fanctl
+mkdir -p "$ROOT/run" "$ROOT/etc" "$ROOT/sys/hwmon6"
+echo 45000 > "$ROOT/sys/hwmon6/temp1_input"      # 45.0 C
+IMG=$ROOT/ec.img
+# The fake EC is a SPARSE file positioned at the same physical offset the real
+# one lives at (0xFE0B0800), so the shipped getb/putb arithmetic is exercised
+# unchanged. Sparse means it costs no disk despite being ~4 GB of address
+# space, and only the few bytes we touch are ever allocated.
+ECOFF=$((0xFE0B0000 + 0x800))
+ECLEN=$((ECOFF + 0x200))
+
+# The code under test. Nothing is rewritten: fanctl reads MEM, K10, CONF,
+# GUARDPID, LOCK and the trip temperatures from the environment when they are
+# set, and falls back to the real paths when they are not. Only the root check
+# is relaxed, because the harness cannot be root; the user namespace gives uid
+# 0 inside, and that is not enough for dd to open the real /dev/mem, which is
+# exactly the boundary we want redirected anyway.
+sed -e 's#^\[ "\$(id -u)" = 0 \].*#: #' "$SRC" > "$ROOT/run/fanctl"
+chmod +x "$ROOT/run/fanctl"
+if diff "$ROOT/run/fanctl" "$SRC" | grep -c '^[<>]' | grep -qx 2; then
+  echo "  verified: the only change to the copy under test is the root check"
+else
+  echo "  WARNING: unexpected rewrite:"; diff "$ROOT/run/fanctl" "$SRC"; exit 1
+fi
+
+reset_ec(){
+  truncate -s "$ECLEN" "$IMG"
+  printf '\x01' | dd of="$IMG" bs=1 seek=$((ECOFF+0x0F)) conv=notrunc status=none  # flags: FANE
+  printf '\x3b' | dd of="$IMG" bs=1 seek=$((ECOFF+0x12)) conv=notrunc status=none  # FNMX = 59
+  printf '\x30' | dd of="$IMG" bs=1 seek=$((ECOFF+0x13)) conv=notrunc status=none  # FNMN = 48
+  printf '\x00' | dd of="$IMG" bs=1 seek=$((ECOFF+0x14)) conv=notrunc status=none  # target
+  printf '\x00' | dd of="$IMG" bs=1 seek=$((ECOFF+0x11)) conv=notrunc status=none  # FRPM
+  rm -f "$ROOT/run/fanctl.guard" "$ROOT/run/fanctl.guard.trip" "$ROOT/run/fanctl.lock"
+  rm -f "$ROOT/etc/fanctl.conf"
+}
+reg(){ dd if="$IMG" bs=1 skip=$((ECOFF+$1)) count=1 status=none 2>/dev/null | od -An -tx1 -v | tr -d ' \n'; }
+settemp(){ printf '%s' "$1" > "$ROOT/sys/hwmon6/temp1_input"; }
+
+# flock target, also redirected out of /run
+mkdir -p "$ROOT/run"
+FAN(){ env HOME="$ROOT" \
+          MEM="$IMG" \
+          K10="$ROOT/sys/hwmon6/temp1_input" \
+          CONF="$ROOT/etc/fanctl.conf" \
+          GUARDPID="$ROOT/run/fanctl.guard" \
+          LOCK="$ROOT/run/fanctl.lock" \
+          PWRDIR="$ROOT/pwr" \
+          unshare -r "$ROOT/run/fanctl" "$@" 2>&1; }
+# Fake power supply, so the AC and battery branches are both reachable without
+# physically unplugging anything. PWR_ONLINE is 1 on mains, 0 on battery.
+setpower(){ mkdir -p "$ROOT/pwr/AC0"; printf '%s' "$1" > "$ROOT/pwr/AC0/online"; }
+
+fail=0
+ok(){ printf '  \033[32mok\033[0m    %s\n' "$1"; }
+bad(){ printf '  \033[31mFAIL\033[0m  %s\n' "$1"; fail=$((fail+1)); }
+
+reset_ec
+out=$(FAN status)
+if echo "$out" | grep -qi "must run as root\|permission denied"; then
+  echo; echo "FATAL: the copy bailed early; every result below would be meaningless."
+  echo "$out"; exit 1
+fi
+echo; echo "--- baseline status ---"; echo "$out" | sed 's/^/  | /'
+
+echo; echo "=== A. the integer-overflow values that silently stopped the fan ==="
+for v in 18446744073709551615 18446744073709551616 99999999999999999999 1000000000 999999999; do
+  reset_ec
+  out=$(FAN manual "$v")
+  t=$(reg 0x14); f=$(reg 0x0F)
+  if [ "$t" = 00 ] && [ "$f" = 09 ]; then
+    bad "manual $v -> target 0x00 with FNSW latched: THE FAN WAS STOPPED"
+  elif [ "$f" = 09 ]; then
+    bad "manual $v -> latched at 0x$t; expected a rejection"
+  else
+    ok "manual $v rejected, EC untouched: $(echo "$out" | grep -m1 out.of.range | sed 's/^ *//')"
+  fi
+done
+
+echo; echo "=== B. ordinary values still command the right register ==="
+for v in 1200 2500 4000 5900 5901 9999; do
+  reset_ec
+  out=$(FAN manual "$v")
+  t=$(reg 0x14); f=$(reg 0x0F)
+  if [ "$v" -gt 5900 ]; then want=3b; why="clamped to FNMX"
+  elif [ "$v" -lt 100 ]; then want=01; why="minimum unit"
+  else want=$(printf '%02x' $(( v / 100 ))); why="exact"; fi
+  if [ "$f" = 09 ] && [ "$t" = "$want" ]; then
+    ok "manual $v -> target 0x$t, FNSW latched ($why)"
+  else
+    bad "manual $v -> flags=0x$f target=0x$t, expected 0x09 / 0x$want"; echo "$out" | sed 's/^/          | /' | head -3
+  fi
+done
+
+echo; echo "=== C. manual 0 means OFF, and gets the low trip point ==="
+reset_ec
+out=$(FAN manual 0)
+echo "$out" | sed 's/^/  | /'
+f=$(reg 0x0F); t=$(reg 0x14)
+[ "$f" = 09 ] && [ "$t" = 00 ] && ok "registers: FNSW latched, target 0x00 (fan stopped, as asked)" || bad "registers f=$f t=$t"
+echo "$out" | grep -q "OFF" && ok "the off path warned explicitly" || bad "no warning shown for a stopped fan"
+if [ -f "$ROOT/run/fanctl.guard.trip" ]; then
+  trip=$(cat "$ROOT/run/fanctl.guard.trip")
+  [ "$trip" = 70 ] && ok "guard armed at 70 C, not the 85 C used for spinning profiles" || bad "guard armed at $trip C, expected 70"
+else
+  bad "no guard armed for a stopped fan"
+fi
+
+echo; echo "=== D. guard argument is validated (it is written to a sourced-file) ==="
+# Double-quoted so the payload carries a real absolute path. If the injection
+# ever worked, the touch would succeed and the test would catch it; with a
+# single-quoted $ROOT it would not expand and the test would pass vacuously.
+for g in "\$(touch $ROOT/PWNED)" "\`touch $ROOT/PWNED\`" \
+         '; id' '70;id' 'abc' '-5' '999' '1000' '70.5' '85' '0'; do
+  reset_ec
+  out=$(FAN guard "$g")
+  if [ -f $ROOT/PWNED ]; then
+    bad "guard '$g' EXECUTED a command"; rm -f $ROOT/PWNED
+  elif [ -f "$ROOT/etc/fanctl.conf" ] && ! echo "$out" | grep -qi "out of range\|needs a\|single number"; then
+    ok "guard '$g' accepted -> conf: $(cat "$ROOT/etc/fanctl.conf")"
+  else
+    ok "guard '$g' rejected"
+  fi
+done
+
+echo; echo "=== E. the config file is parsed, never sourced ==="
+reset_ec
+FAN onac silent >/dev/null; FAN ondc balanced >/dev/null
+echo "  written by fanctl: $(tr '\n' '|' < "$ROOT/etc/fanctl.conf")"
+for payload in "ONAC=quiet; touch $ROOT/PWNED2" \
+               "ONDC=\$(touch $ROOT/PWNED3)" \
+               "GUARD_TEMP=\$(touch $ROOT/PWNED4)"; do
+  rm -f $ROOT/PWNED2 $ROOT/PWNED3 $ROOT/PWNED4
+  printf '%s\n' "$payload" >> "$ROOT/etc/fanctl.conf"
+  out=$(FAN apply)
+  if ls $ROOT/PWNED[234] >/dev/null 2>&1; then
+    bad "apply EXECUTED the planted line: $payload"; rm -f $ROOT/PWNED[234]
+  else
+    if [ -z "$out" ]; then bad "apply printed NOTHING at all - that is a silent failure, not a clean rejection"
+    else ok "apply treated it as data, not code: $(echo "$out" | grep -im1 'unknown\|ignoring\|refus' | sed 's/^ *//')"; fi
+  fi
+done
+
+echo; echo "=== F. a guard actually fires and releases the fan ==="
+reset_ec
+FAN off >/dev/null
+[ "$(reg 0x0F)" = 09 ] || bad "off did not latch"
+settemp 69000                                     # 69 C, below the 70 C trip
+sleep 3
+[ "$(reg 0x0F)" = 09 ] && ok "holds the fan stopped at 69 C" || bad "released early at 69 C"
+settemp 72000                                     # 72 C, above the trip
+for _ in $(seq 1 20); do [ "$(reg 0x0F)" = 01 ] && break; sleep 1; done
+if [ "$(reg 0x0F)" = 01 ]; then
+  ok "tripped at 72 C and handed the fan back to the firmware curve (FNSW cleared)"
+else
+  bad "still latched at 72 C; the guard did not fire"
+fi
+[ -f "$ROOT/run/fanctl.guard" ] && bad "stale guard pid file left behind" || ok "guard cleaned up its own pid file"
+settemp 45000
+
+echo; echo "=== F2. max arms NO guard, and stays latched past the 85 C trip point ==="
+reset_ec
+out=$(FAN max)
+echo "$out" | grep -qi "no thermal guard" && ok "max itself said it armed no guard" || bad "max did not print its no-guard notice"
+[ -f "$ROOT/run/fanctl.guard" ]       && bad "max left a guard pid file"  || ok "max armed no guard pid file"
+[ -f "$ROOT/run/fanctl.guard.trip" ]  && bad "max left a trip sidecar"    || ok "max armed no trip sidecar"
+settemp 92000                                     # 92 C, well above the 85 C the other profiles use
+sleep 3                                           # long enough for a guard poll cycle to have fired
+if [ "$(reg 0x0F)" = 09 ] && [ "$(reg 0x14)" = 3b ]; then
+  ok "at 92 C max is still latched (flags 0x09, target 59) - nothing released it"
+else
+  bad "max released at high temp: flags=0x$(reg 0x0F) target=0x$(reg 0x14)"
+fi
+settemp 45000
+
+echo; echo "=== F3. switching FROM a guarded profile TO max disarms the old guard ==="
+reset_ec
+FAN silent >/dev/null
+[ -f "$ROOT/run/fanctl.guard.trip" ] && ok "silent armed its 85 C guard first" || bad "silent armed no guard to begin with"
+FAN max >/dev/null
+[ -f "$ROOT/run/fanctl.guard" ]      && bad "a stale guard survived switching to max (pid file remains)" || ok "switching to max disarmed the previous guard"
+[ -f "$ROOT/run/fanctl.guard.trip" ] && bad "stale trip sidecar survived switching to max"               || ok "trip sidecar removed too"
+settemp 92000
+sleep 3
+[ "$(reg 0x0F)" = 09 ] && ok "after silent->max, still latched at 92 C - the old guard is really gone" || bad "released at 92 C after silent->max"
+settemp 45000
+
+echo; echo "=== G. a missing sensor is survivable ==="
+reset_ec
+rm -f "$ROOT/sys/hwmon6/temp1_input"
+out=$(FAN off)
+echo "$out" | grep -q "?" && ok "off works and reports '?' for the missing temperature" || { bad "off broke without a sensor"; echo "$out" | sed 's/^/          | /'; }
+echo 45000 > "$ROOT/sys/hwmon6/temp1_input"
+
+echo; echo "=== H. no negative RPM is ever displayed ==="
+reset_ec
+out=$(FAN status)
+if echo "$out" | grep -qE '(-[0-9]+ RPM|0x[0-9A-F]{9,})'; then
+  bad "status printed a negative or malformed value:"; echo "$out" | sed 's/^/          | /'
+else
+  ok "status shows no negative RPM or oversized hex"; echo "$out" | sed 's/^/  | /'
+fi
+
+echo; echo "=== I. concurrent invocations do not interleave into a torn state ==="
+for n in 1 2 3 4 5 6 7 8 9 10; do FAN silent >/dev/null & done
+wait
+f=$(reg 0x0F); t=$(reg 0x14)
+if [ "$f" = 09 ] && [ "$t" = 0c ]; then ok "10 concurrent: flags=0x$f target=0x$t, exactly what silent commands (12 units)"
+else bad "10 concurrent: flags=0x$f target=0x$t, expected 09/12"; fi
+
+echo; echo "=== J. every profile lands on its documented register ==="
+for p in off silent quiet balanced performance max; do
+  reset_ec
+  out=$(FAN "$p")
+  f=$(reg 0x0F); t=$(reg 0x14)
+  # NOTE: bin/fanctl's PROFILE table is in DECIMAL register units (100 RPM each),
+  # so silent=12 units is 0x0C, not 0x12. Convert properly rather than eyeballing.
+  units=$(case $p in off) echo 0;; silent) echo 12;; quiet) echo 20;; balanced) echo 30;; performance) echo 42;; max) echo 59;; esac)
+  want=$(printf '%02x' "$units")
+  if [ "$f" = 09 ] && [ "$t" = "$want" ]; then ok "$p -> target 0x$t, latched"
+  else bad "$p -> flags=0x$f target=0x$t, expected 0x09 / 0x$want"; fi
+done
+
+echo; echo "=== K. auto releases the latch, and does so from a stopped fan ==="
+reset_ec
+FAN max >/dev/null
+[ "$(reg 0x0F)" = 09 ] && ok "max latched at 0x$(reg 0x14)" || bad "max did not latch"
+FAN auto >/dev/null
+[ "$(reg 0x0F)" = 01 ] && ok "auto cleared FNSW back to 0x01" || bad "auto left flags=0x$(reg 0x0F)"
+[ -f "$ROOT/run/fanctl.guard.trip" ] && bad "auto left the trip sidecar behind" || ok "auto removed the trip sidecar"
+
+echo; echo "=== L. onac/ondc apply the right profile for the power source ==="
+reset_ec; setpower 1
+FAN onac quiet >/dev/null; FAN ondc silent >/dev/null
+FAN apply >/dev/null
+[ "$(reg 0x14)" = 14 ] && ok "on AC: quiet applied (20 units = 0x14 = 2000 RPM)" || bad "on AC: got 0x$(reg 0x14), expected 0x14"
+FAN apply >/dev/null
+[ "$(reg 0x14)" = 14 ] && ok "still on AC after a second apply: unchanged, as expected" || bad "AC apply was not idempotent"
+setpower 0   # pull the charger
+FAN apply >/dev/null
+[ "$(reg 0x14)" = 0c ] && ok "on battery: silent applied (12 units = 0x0C = 1200 RPM)" || bad "on battery: got 0x$(reg 0x14), expected 0x0c"
+echo "$out" | grep -q "" 
+# and ONAC=auto must mean "leave it to the firmware", i.e. FNSW cleared
+reset_ec; setpower 1
+FAN onac auto >/dev/null; FAN ondc max >/dev/null
+FAN apply >/dev/null
+[ "$(reg 0x0F)" = 01 ] && ok "onac=auto clears the latch on AC instead of pinning a speed" || bad "onac=auto left flags=0x$(reg 0x0F)"
+
+echo; echo "=== M. an unreadable EC fails safely instead of writing garbage ==="
+reset_ec
+# NB: chmod 000 is useless here - inside `unshare -r` we are uid 0, and root
+# ignores file permission bits. Use a genuinely missing device instead.
+out=$(env HOME="$ROOT" MEM="$ROOT/no-such-ec" K10="$ROOT/sys/hwmon6/temp1_input" \
+          CONF="$ROOT/etc/fanctl.conf" GUARDPID="$ROOT/run/fanctl.guard" \
+          LOCK="$ROOT/run/fanctl.lock" unshare -r "$ROOT/run/fanctl" manual 2500 2>&1)
+if echo "$out" | grep -qi "cannot read the EC\|cannot read FNMX\|unreadable\|permission denied"; then
+  ok "refused cleanly: $(echo "$out" | grep -m1 . | sed 's/^ *//')"
+else
+  bad "gave no error on an unreadable EC: $(echo "$out" | head -2 | tr '\n' ' ')"
+fi
+reset_ec
+f=$(reg 0x0F)
+[ "$f" = 01 ] && ok "the refused write left the EC exactly as it was (flags=0x01)" || bad "EC was modified despite the failure (flags=0x$f)"
+
+echo; echo "=== N. an armed guard must NOT hold the lock hostage ==="
+# Regression: the guard is a background subshell, so it inherited the lock fd.
+# flock locks live on the open file description, not the process, so the guard
+# held the lock for as long as it ran and every later fanctl stalled for the
+# full 5s timeout - including read-only status.
+reset_ec; setpower 1
+FAN silent >/dev/null
+gp=$(cat "$ROOT/run/fanctl.guard" 2>/dev/null)
+[ -n "$gp" ] && ok "guard armed (pid $gp)" || bad "no guard armed by silent"
+if ls -l /proc/$gp/fd 2>/dev/null | grep -q lock; then
+  bad "the guard still holds the lock fd - every later fanctl will stall"
+else
+  ok "the guard closed the inherited lock descriptor"
+fi
+t0=$(date +%s%N); FAN status >/dev/null; t1=$(date +%s%N)
+ms=$(( (t1-t0)/1000000 ))
+if [ "$ms" -lt 1000 ]; then ok "status with a guard armed took ${ms}ms (no lock stall)"
+else bad "status took ${ms}ms - it is blocking on the lock"; fi
+t0=$(date +%s%N); FAN max >/dev/null; t1=$(date +%s%N)
+ms=$(( (t1-t0)/1000000 ))
+if [ "$ms" -lt 1500 ]; then ok "a write command with a guard armed took ${ms}ms (the old guard was replaced, not queued behind)"
+else bad "write command took ${ms}ms - blocked on the previous guard's lock"; fi
+# only one guard should ever exist at a time
+n=$(pgrep -c -f "$ROOT/run/fanctl" 2>/dev/null || true); n=${n:-0}
+[ "$n" -le 1 ] && ok "exactly $n fanctl guard process alive, not one per command" || bad "$n guard processes alive; they are piling up"
+
+echo; echo "=== O. an unreadable FNMX refuses rather than commanding blind ==="
+reset_ec
+# zero out FNMX's read by pointing MEM at an image where 0x812 is absent is not
+# possible, so instead truncate the image just past the flags register.
+truncate -s $((ECOFF+0x10)) "$IMG"
+out=$(FAN manual 2500)
+if echo "$out" | grep -qi "FNMX\|ceiling is unknown"; then
+  ok "refused: $(echo "$out" | grep -m1 -i 'fnmx' | sed 's/^ *//')"
+else
+  bad "wrote a speed with no known ceiling: $(echo "$out" | head -2 | tr '\n' ' ')"
+fi
+reset_ec
+
+echo; echo "=== P. read-only subcommands never take the lock at all ==="
+reset_ec
+mkdir -p "$ROOT/run"
+out=$(FAN status 2>&1)
+echo "$out" | grep -qi "held the lock" && bad "status reported waiting on the lock" || ok "status never touched the lock"
+out=$(FAN list 2>&1)
+echo "$out" | grep -qi "held the lock" && bad "list reported waiting on the lock" || ok "list never touched the lock"
+
+echo; echo "=== Q. bad invocations fail loudly, not silently ==="
+for bad_args in "bogus" "silnet" "--help" "-h" "manual" "manual abc" "set" "onac nosuchprofile" "ondc" "onac" "apply" "guard" "zzz qqq"; do
+  reset_ec
+  out=$(FAN $bad_args)
+  rc=$?
+  f=$(reg 0x0F)
+  if [ -z "$out" ] && [ "$rc" -eq 0 ]; then
+    bad "'fanctl $bad_args' printed nothing and exited 0 (silent no-op)"
+  elif echo "$out" | grep -q "bad array subscript\|bad substitution\|unbound variable"; then
+    bad "'fanctl $bad_args' leaked a raw bash error: $(echo "$out" | grep -m1 . | cut -c1-80)"
+  elif [ "$f" != 01 ]; then
+    bad "'fanctl $bad_args' changed the EC to flags=0x$f"
+  else
+    ok "'fanctl $bad_args' -> rc=$rc, EC untouched, said: $(echo "$out" | grep -m1 . | cut -c1-70)"
+  fi
+done
+
+echo
+if [ "$fail" -eq 0 ]; then echo "=== all harness checks passed ==="; else echo "=== $fail check(s) FAILED ==="; fi
+exit $(( fail > 0 ))

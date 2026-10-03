@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# run-all - execute every verification script and summarise.
+#
+# Two very different kinds of test live here.
+#
+#   harness   no root, no hardware, touches nothing real. It runs the REAL
+#             bin/fanctl against a fake EC in a user namespace. Run this one
+#             freely and often - it is the regression suite, and it is the only
+#             test that can cover bad arguments, overflow, concurrency and
+#             guard races without stopping your actual fan.
+#
+#   the rest  write to the real EC and need root. They restore the firmware
+#             temperature curve on exit, including on Ctrl-C, but run one at a
+#             time rather than in parallel: they share one fan.
+
+set -uo pipefail
+HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+
+pass=0; fail=0
+run(){
+  echo
+  echo "############################################################"
+  echo "# $1"
+  echo "############################################################"
+  if bash "$HERE/$1"; then echo "--> $1 completed"; pass=$(( pass + 1 ))
+  else echo "--> $1 FAILED (exit $?)"; fail=$(( fail + 1 )); fi
+}
+
+# Safe to run unprivileged and without hardware. Do these first: if they fail,
+# the hardware tests below are testing broken code.
+echo "############################################################"
+echo "# harness - the real bin/fanctl against a fake EC. No root, no hardware."
+echo "############################################################"
+run harness
+run fanrpm-display
+
+[ "$(id -u)" = 0 ] || { echo; echo "not root: skipping the hardware tests, which need it."; }
+
+if [ "$(id -u)" = 0 ]; then
+  for t in fanlatch fantail fanoff; do
+    run "$t"
+    sleep 3
+  done
+
+  echo
+  echo "############################################################"
+  echo "# fanoff stops the fan and ramps the CPU. It aborts at the same"
+  echo "# temperature fanctl uses for the off threshold, so it is bounded, but"
+  echo "# it does heat the machine. Run it deliberately, not in a loop."
+  echo "############################################################"
+fi
+
+echo
+echo "############################################################"
+echo "# fansweep is interactive and destructive; skipped by default."
+echo "# Run it directly if you are re-deriving the FNSW mechanism:"
+echo "#     sudo $HERE/fansweep"
+echo "############################################################"
+
+echo
+echo "completed: $pass   failed: $fail"
+[ "$fail" -eq 0 ] || exit 1

@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+# fantail - settle-time test for the low end of the range.
+#
+# Why: the profile ladder reported 1200 RPM as "peak 5900". That was almost
+# certainly the fan still spinning down from the previous step, because the
+# metric was a 4-second PEAK. A peak cannot tell "rejected the command" from
+# "has not arrived yet". This samples long enough to settle and reports the
+# whole trajectory, not just the maximum.
+#
+# Tests the bottom of the range where the interesting failure modes are:
+#   0  - does a latched 0 stop the fan, or is it just "no command"?
+#   12 - is 1200 RPM actually reachable, or is there a stall floor?
+#
+# Releases to the firmware curve on exit, including on Ctrl-C.
+
+set -u
+BASE=$((0xFE0B0000)); OFF=$((0x800)); ACPI=/proc/acpi/call
+K10=/sys/class/hwmon/hwmon6/temp1_input
+F_FLAGS=0x0F; F_TGT=0x14; FNSW=0x08
+SETTLE=14      # seconds to watch per target
+ABORT_TEMP=88  # bail out to firmware if the CPU gets this hot
+
+[ "$(id -u)" = 0 ] || { echo "must be root" >&2; exit 1; }
+
+getb(){ local v; v=$(dd if=/dev/mem bs=1 skip=$((BASE+OFF+$1)) count=1 status=none 2>/dev/null|od -An -tx1 -v|tr -d ' \n')
+         case $v in ''|*[!0-9a-fA-F]*) echo -1 ;; *) echo $(( 16#$v )) ;; esac; }
+putb(){ printf "\\$(printf '%03o' "$2")" | dd of=/dev/mem bs=1 seek=$((BASE+OFF+$1)) conv=notrunc status=none; }
+rpm(){ printf '%s\n' '\\_TZ.TSZ0.FRSP' > "$ACPI" 2>/dev/null
+       local v; v=$(cat "$ACPI" 2>/dev/null|tr '\000' '\n'|head -n1|tr -cd '[:print:]')
+       [[ $v =~ ^0x ]] && echo $(( v )) || echo -1; }
+cput(){ [ -r "$K10" ] && awk -v m="$(cat "$K10")" 'BEGIN{printf "%.1f",m/1000}' || echo '?'; }
+acst(){ local p; for p in /sys/class/power_supply/AC*/online; do
+          [ -r "$p" ] && [ "$(cat "$p")" = 1 ] && { echo AC; return; }; done; echo DC; }
+
+ORIG_TGT=$(getb $F_TGT)
+to_auto(){ local f; f=$(getb $F_FLAGS); putb $F_FLAGS $(( f & ~FNSW )); }
+restore(){ to_auto; putb $F_TGT "$ORIG_TGT"; }
+trap 'echo; echo "[interrupted - releasing to firmware curve]"; restore; exit 130' INT TERM
+trap 'restore' EXIT
+
+echo
+echo "=== baseline: firmware curve, no command ==="
+to_auto; putb $F_TGT 0; sleep 3
+printf '  fan %d RPM   CPU %s C   %s\n' "$(rpm)" "$(cput)" "$(acst)"
+
+for u in 0 12 20 30; do
+  echo
+  printf '=== command %d reg units (%d RPM), watching %d s ===\n' "$u" "$(( u * 100 ))" "$SETTLE"
+  f=$(getb $F_FLAGS)
+  putb $F_FLAGS $(( f | FNSW ))
+  putb $F_TGT "$u"
+  traj=""; i=0
+  while [ "$i" -lt "$SETTLE" ]; do
+    traj="$traj $(rpm)"
+    t=$(cput)
+    if awk -v t="$t" -v l="$ABORT_TEMP" 'BEGIN{exit !(t>=l)}'; then
+      echo "  CPU hit ${t}C - aborting, releasing to firmware curve"
+      restore; exit 1
+    fi
+    sleep 1; i=$(( i + 1 ))
+  done
+  last=$(echo $traj | awk '{print $NF}')
+  lo=$(echo $traj | tr ' ' '\n' | sort -n | head -1)
+  hi=$(echo $traj | tr ' ' '\n' | sort -n | tail -1)
+  printf '  trajectory:%s\n' "$traj"
+  printf '  settled %5d RPM   (min %d, max %d)   CPU %s C\n' "$last" "$lo" "$hi" "$(cput)"
+  if [ "$last" = "$(( u * 100 ))" ]; then
+    printf '  VERDICT  reached the commanded speed\n'
+  elif [ "$lo" -lt $(( u * 100 )) ] 2>/dev/null; then
+    printf '  VERDICT  passed through %d but settled at %d - there is a floor around here\n' "$lo" "$last"
+  else
+    printf '  VERDICT  never reached %d - command ignored at this level\n' "$(( u * 100 ))"
+  fi
+  sleep 2
+done
+
+echo
+echo "=== releasing to firmware curve ==="
+restore; sleep 2
+printf '  fan %d RPM   FNSW=%d   CPU %s C\n' "$(rpm)" $(( ($(getb $F_FLAGS) >> 3) & 1 )) "$(cput)"
+echo
