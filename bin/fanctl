@@ -56,7 +56,7 @@ declare -A PDESC=(
   [quiet]="library and office work"
   [balanced]="everyday default"
   [performance]="sustained load"
-  [max]="firmware ceiling FNMX, loudest"
+  [max]="firmware ceiling FNMX (no thermal guard - auto cannot cool more)"
 )
 
 [ "$(id -u)" = 0 ] || { echo "fanctl: must run as root (writes $MEM)" >&2; exit 1; }
@@ -323,8 +323,9 @@ list)
   printf '  %-12s  %5s   %-6s  %s\n' "onac <prof>" "-" "" "apply when on mains"
   printf '  %-12s  %5s   %-6s  %s\n' "ondc <prof>" "-" "" "apply when on battery"
   printf '  %-12s  %5s   %-6s  %s\n\n' "guard [degC]" "85" "" "auto-revert threshold"
-  printf '  Note: "off" is not a normal profile. It stops the fan, and the guard\n'
-  printf '  for it trips at %s C rather than 85. See "fanctl off".\n\n' "$OFF_GUARD_TEMP"
+  printf '  Note: "off" stops the fan and the guard for it trips at %s C rather\n' "$OFF_GUARD_TEMP"
+  printf '  than 85. "max" arms NO guard at all: auto cannot cool more than the\n'
+  printf '  ceiling, so it stays latched until you change it. See "fanctl max".\n\n'
   ;;
 
 set|manual|custom|off|silent|quiet|balanced|performance|max)
@@ -390,7 +391,18 @@ set|manual|custom|off|silent|quiet|balanced|performance|max)
   fi
 
   command_units "$units" || exit 1
-  start_guard
+  # A commanded speed at the FNMX ceiling is already the most cooling this
+  # machine can produce. Releasing it to auto on a trip would do the opposite
+  # of protecting the machine: auto on AC is a flat 4500 RPM, less than the
+  # 5900 ceiling. So the ceiling arms no guard - and any guard left over from
+  # an earlier, lower profile is disarmed here too, because a stale guard
+  # would still release the fan to auto at its old trip point.
+  if [ "$ceiling" -gt 0 ] && [ "$units" -ge "$ceiling" ]; then
+    stop_guard
+    printf '  no thermal guard: fan is at the FNMX ceiling\n'
+  else
+    start_guard
+  fi
   if [ "$clamped" = 1 ]; then
     printf '  %s -> clamped to %d RPM (register ceiling FNMX=%d)\n' "$desc" "$(( units * 100 ))" "$ceiling"
   else
@@ -488,8 +500,18 @@ apply)
     echo "  $src -> auto (firmware curve)"
   else
     command_units "${PROFILE[$p]}" || exit 1
-    # same rule as the set path: a stopped fan gets the low trip point
-    if [ "${PROFILE[$p]}" -eq 0 ]; then start_guard "$OFF_GUARD_TEMP"; else start_guard; fi
+    # same rule as the set path: a stopped fan gets the low trip point, and a
+    # fan at the FNMX ceiling gets no guard at all (auto cannot protect more
+    # than the ceiling already does - on AC auto is a flat 4500 RPM).
+    if [ "${PROFILE[$p]}" -eq 0 ]; then start_guard "$OFF_GUARD_TEMP"
+    else
+      ceiling=$(getb $F_MAXR)
+      if [ "$ceiling" -gt 0 ] && [ "${PROFILE[$p]}" -ge "$ceiling" ]; then
+        stop_guard
+      else
+        start_guard
+      fi
+    fi
     echo "  $src -> $p ($(( ${PROFILE[$p]} * 100 )) RPM)"
   fi
   show
@@ -513,7 +535,8 @@ usage)
   to 0x814. FNSW stays set while the command is active; "auto" clears it and
   hands the fan back to the firmware temperature curve. A thermal guard watches
   CPU temperature and releases to auto if you command a speed the machine
-  cannot run at.
+  cannot run at. The one exception: "max" is already the ceiling, so it arms no
+  guard and stays latched until you change it.
 EOF
   ;;
 

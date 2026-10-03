@@ -50,6 +50,16 @@ Requirements: root, `lockdown=off` (currently `[none]`). Nothing else. No
 | `fanctl ondc silent`     | profile to use on battery                         |
 | `fanctl apply`           | apply whichever profile matches the power source  |
 
+Breaking `fanctl max`'s behavior down since it is different from the rest:
+`max` is the `FNMX` ceiling, and it arms **no thermal guard**. The guard's job
+is to drop a low commanded speed for the firmware curve when things get hot -
+which only makes sense when the curve can spin faster than you asked. At the
+ceiling there is nothing faster to fall back to (on AC the curve is a flat
+4500 RPM), so a guard would *reduce* cooling exactly when you need it most.
+`fanctl max` therefore stays latched at 5900 until you run another `fanctl`
+command (or the machine reboots). The hardware 112 C cutoff (`TSZ0._HOT`) and
+CPU throttling remain the last line of defence.
+
 `fanrpm` is a live monitor with a sparkline. It needs the optional module
 below for its AML column; the raw column always works.
 
@@ -100,6 +110,9 @@ for short bursts, while if it hits the limit the threshold needs to come down.
 **The latch outlives the process.** That is what makes profiles work, and it
 also means a bad command persists until something clears it. Hence the thermal
 guard, which calls `fanctl auto` at 85 C. Set your own with `fanctl guard`.
+The exception is `fanctl max`: it is the ceiling, so a guard could only
+*reduce* cooling (auto on AC is a flat 4500 RPM) - it arms no guard and stays
+latched until you change it.
 
 **`/dev/mem` must stay readable** - `lockdown` must not be set to `confidential`
 or `integrity`.

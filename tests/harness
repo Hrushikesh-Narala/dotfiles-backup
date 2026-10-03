@@ -184,6 +184,33 @@ fi
 [ -f "$ROOT/run/fanctl.guard" ] && bad "stale guard pid file left behind" || ok "guard cleaned up its own pid file"
 settemp 45000
 
+echo; echo "=== F2. max arms NO guard, and stays latched past the 85 C trip point ==="
+reset_ec
+out=$(FAN max)
+echo "$out" | grep -qi "no thermal guard" && ok "max itself said it armed no guard" || bad "max did not print its no-guard notice"
+[ -f "$ROOT/run/fanctl.guard" ]       && bad "max left a guard pid file"  || ok "max armed no guard pid file"
+[ -f "$ROOT/run/fanctl.guard.trip" ]  && bad "max left a trip sidecar"    || ok "max armed no trip sidecar"
+settemp 92000                                     # 92 C, well above the 85 C the other profiles use
+sleep 3                                           # long enough for a guard poll cycle to have fired
+if [ "$(reg 0x0F)" = 09 ] && [ "$(reg 0x14)" = 3b ]; then
+  ok "at 92 C max is still latched (flags 0x09, target 59) - nothing released it"
+else
+  bad "max released at high temp: flags=0x$(reg 0x0F) target=0x$(reg 0x14)"
+fi
+settemp 45000
+
+echo; echo "=== F3. switching FROM a guarded profile TO max disarms the old guard ==="
+reset_ec
+FAN silent >/dev/null
+[ -f "$ROOT/run/fanctl.guard.trip" ] && ok "silent armed its 85 C guard first" || bad "silent armed no guard to begin with"
+FAN max >/dev/null
+[ -f "$ROOT/run/fanctl.guard" ]      && bad "a stale guard survived switching to max (pid file remains)" || ok "switching to max disarmed the previous guard"
+[ -f "$ROOT/run/fanctl.guard.trip" ] && bad "stale trip sidecar survived switching to max"               || ok "trip sidecar removed too"
+settemp 92000
+sleep 3
+[ "$(reg 0x0F)" = 09 ] && ok "after silent->max, still latched at 92 C - the old guard is really gone" || bad "released at 92 C after silent->max"
+settemp 45000
+
 echo; echo "=== G. a missing sensor is survivable ==="
 reset_ec
 rm -f "$ROOT/sys/hwmon6/temp1_input"
@@ -284,7 +311,7 @@ ms=$(( (t1-t0)/1000000 ))
 if [ "$ms" -lt 1500 ]; then ok "a write command with a guard armed took ${ms}ms (the old guard was replaced, not queued behind)"
 else bad "write command took ${ms}ms - blocked on the previous guard's lock"; fi
 # only one guard should ever exist at a time
-n=$(pgrep -c -f "$ROOT/run/fanctl" 2>/dev/null || echo 0)
+n=$(pgrep -c -f "$ROOT/run/fanctl" 2>/dev/null || true); n=${n:-0}
 [ "$n" -le 1 ] && ok "exactly $n fanctl guard process alive, not one per command" || bad "$n guard processes alive; they are piling up"
 
 echo; echo "=== O. an unreadable FNMX refuses rather than commanding blind ==="
