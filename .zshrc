@@ -49,7 +49,7 @@ alias ram='free -h'
 alias disks='df -h'
 alias c='clear'
 alias cls='clear'
-alias dotfiles='/usr/bin/git --git-dir=$HOME/.dotfiles.git --work-tree=$HOME'
+alias dotfiles='/usr/bin/git -C $HOME/dotfiles-backup'
 
 export PATH="$HOME/.var/app/ai.lmstudio.lm-studio/.lmstudio/bin:$PATH"
 

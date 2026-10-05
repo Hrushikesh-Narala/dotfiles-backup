@@ -1,18 +1,23 @@
 # dotfiles-backup
 
-Personal dotfiles for **Nobara Linux 41** (KDE Plasma 6 / Wayland).
+Personal dotfiles for **Nobara Linux 44** (KDE Plasma 6 / Wayland).
 
-Managed with a **bare git repo** at `~/.dotfiles.git` — the working tree is `$HOME` itself, so all tracked files live exactly where they belong.
+Managed with a **normal git clone** at `~/dotfiles-backup`.
 
 ```sh
-alias dotfiles='/usr/bin/git --git-dir=$HOME/.dotfiles.git --work-tree=$HOME'
+alias dotfiles='/usr/bin/git -C $HOME/dotfiles-backup'
 ```
+
+Tracked files are copies, not symlinks — copy between `$HOME` and the repo by
+hand. Files that must live outside `$HOME` (root-owned paths under `/etc` and
+`/usr`) are stored under `.config/etc/` and deployed with `sudo install`; see
+[Restoring From Scratch](#restoring-from-scratch-full-procedure).
 
 ---
 
 ## Table of Contents
 
-- [Initial Setup (bare git repo)](#initial-setup-bare-git-repo)
+- [Initial Setup (normal clone)](#initial-setup-normal-clone)
 - [SSH Key & Remote](#ssh-key--remote)
 - [Branch Rename: master → main](#branch-rename-master--main)
 - [Conflict Resolution During Restore](#conflict-resolution-during-restore)
@@ -35,6 +40,8 @@ alias dotfiles='/usr/bin/git --git-dir=$HOME/.dotfiles.git --work-tree=$HOME'
 - [X Settings Daemon: xsettingsd](#x-settings-daemon-xsettingsd)
 - [KDE Autostart Entries](#kde-autostart-entries)
 - [KWin Script: Move Follow](#kwin-script-move-follow)
+- [Wi-Fi Across Suspend](#wi-fi-across-suspend)
+- [Driver: rtw89 WoWLAN Firmware Errors](#driver-rtw89-wowlan-firmware-errors)
 - [Post-Install Actions](#post-install-actions)
   - [Bat Theme Cache](#bat-theme-cache)
   - [Fontconfig Cache](#fontconfig-cache)
@@ -46,23 +53,32 @@ alias dotfiles='/usr/bin/git --git-dir=$HOME/.dotfiles.git --work-tree=$HOME'
 
 ---
 
-## Initial Setup (bare git repo)
+## Initial Setup (normal clone)
 
-The repo was **not cloned normally**. Instead it was restored from a bare git init:
+The repo is a **normal clone** at `~/dotfiles-backup`:
 
 ```sh
-git init --bare ~/.dotfiles.git
-git --git-dir=$HOME/.dotfiles.git remote add origin git@github.com:Hrushikesh-Narala/dotfiles-backup.git
-git --git-dir=$HOME/.dotfiles.git fetch origin
-git --git-dir=$HOME/.dotfiles.git --work-tree=$HOME reset origin/main
+git clone git@github.com:Hrushikesh-Narala/dotfiles-backup.git ~/dotfiles-backup
 ```
 
-Because the working tree is `$HOME`, `reset` overwrites existing config files in place. If a file already exists locally and is tracked in the repo, it gets overwritten by the version from the repo.
+> **History.** This repo was originally used as a bare repo with `$HOME` as its
+> working tree (`git init --bare ~/.dotfiles.git` + `reset origin/main`), which
+> checked dotfiles out in place. That still appears in
+> [Restoring From Scratch](#restoring-from-scratch-full-procedure) but is
+> superseded — see the note there. A leftover `~/.dotfiles.git` from that era may
+> still exist on disk; it is stale (last commit June, 54 files) and is no longer
+> what anything points at.
+
+Because the working tree is `~/dotfiles-backup` and not `$HOME`, tracked files
+are **copies**. Editing a dotfile means editing it in `$HOME` *and* copying it
+into the repo, or vice versa — git will not see changes made directly in `$HOME`.
+Root-owned files under `/etc` and `/usr` are stored as copies under
+`.config/etc/` for the same reason.
 
 The `dotfiles` alias lives in `~/.zshrc`:
 
 ```sh
-alias dotfiles='/usr/bin/git --git-dir=$HOME/.dotfiles.git --work-tree=$HOME'
+alias dotfiles='/usr/bin/git -C $HOME/dotfiles-backup'
 ```
 
 Usage examples:
@@ -70,7 +86,7 @@ Usage examples:
 | Command | What it does |
 |---------|--------------|
 | `dotfiles status` | Check what's changed |
-| `dotfiles add ~/.zshrc` | Stage a file |
+| `dotfiles add .zshrc` | Stage a file (paths are relative to the repo) |
 | `dotfiles commit -m "msg"` | Commit staged changes |
 | `dotfiles push` | Push to GitHub |
 | `dotfiles pull` | Pull from GitHub |
@@ -506,6 +522,161 @@ movefollowEnabled=true
 
 ---
 
+## Wi-Fi Across Suspend
+
+Keeps the Wi-Fi association, the DHCP lease and the `wpa_supplicant` session
+alive across suspend-to-RAM, so nothing appears on the access point as a
+disconnect/reconnect on wake. Applies to every Wi-Fi network, including SSIDs
+never connected to before.
+
+### Files
+
+| Live path | Tracked as |
+|-----------|-----------|
+| `/etc/NetworkManager/conf.d/20-wifi-wowlan.conf` | `.config/etc/NetworkManager/conf.d/20-wifi-wowlan.conf` |
+| `/usr/lib/systemd/system-sleep/wifi-wowlan-resume.sh` | `.config/etc/usr/lib/systemd/system-sleep/wifi-wowlan-resume.sh` |
+| `~/.local/bin/check-resume-clean.sh` | `.local/bin/check-resume-clean.sh` |
+
+The two files under `/etc` and `/usr` are **stored as copies** and must be
+deployed manually (see [Restoring From Scratch](#restoring-from-scratch-full-procedure)).
+A `$HOME` git worktree cannot track them.
+
+### The problem
+
+NetworkManager tears a Wi-Fi device down on sleep unless Wake-on-LAN is armed.
+Armed, it keeps the radio up and associated across suspend — and on wake it
+*deliberately* tears the radio back down anyway, for the stated reason that it
+wants to re-check connectivity:
+
+> Belatedly take down Wake-on-LAN devices; ideally we wouldn't have to do this
+> but for now it's the only way to make sure we re-check their connectivity.
+> — `src/core/nm-manager.c`, `_handle_device_takedown()`
+
+That second teardown is the resume blip: deauth → re-authenticate → associate →
+4-way handshake → new DHCP lease, measured at ~3.0–3.7s from `PM: suspend exit`
+to a fresh lease.
+
+Crucially, NM makes **two** independent WoWLAN checks, one before suspend and
+one after resume, and both read *live* kernel state
+(`NL80211_CMD_GET_WOWLAN` via `nm-wifi-utils-nl80211.c`) rather than a cached
+value. Nothing stops the two from disagreeing.
+
+### The fix
+
+The sleep hook runs as `post suspend`, inside `/usr/lib/systemd/system-sleep/`,
+which systemd executes *after* the kernel resumes but *before* logind emits
+`PrepareForSleep(false)` to NetworkManager. That is a ~2ms window, and it is
+deterministic rather than a race:
+
+```
+6998.554236  Finished systemd-suspend.service        <- the hook has returned
+6998.557111  systemd-logind: Operation 'suspend' finished
+6998.560188  NetworkManager: sleep: wake requested    <- NM reads GET_WOWLAN here
+```
+
+So the hook clears WoWLAN in that gap. The radio was kept up and associated for
+the whole sleep, but NM's wake-time check now reads "not a wake-on-LAN device"
+and skips the takeover. Nothing is torn down, so nothing needs rebuilding.
+
+### Why WoWLAN is re-armed afterwards
+
+On that path NM never re-activates the connection — that is the whole point —
+so it never re-arms WoWLAN either. It must be armed again before the *next*
+suspend, or NM would tear the radio down when the machine next sleeps.
+
+The hook re-arms via a transient timer rather than sleeping inline, because the
+hook runs inside the sleep job and systemd applies a timeout to it.
+
+```sh
+systemd-run --quiet --collect --unit=wifi-wowlan-rearm --on-active=3 \
+	--timer-property=AccuracySec=1us \
+	/usr/bin/iw phy "$phy" wowlan enable disconnect magic-packet
+```
+
+**`AccuracySec=1us` is load-bearing, not decoration.** systemd's default is
+`1min`, which explicitly permits coalescing the timer and firing it arbitrarily
+late. That was measured landing 3.1s after a 10s request — fatal here, since the
+whole point is to land *before* the user next sleeps. It caused a real failure:
+a re-sleep 14s after waking found WoWLAN still disarmed, so NM tore the radio
+down normally. With the accuracy pinned it fires at 3.003s for a 3s request.
+
+### Resume cost
+
+The hook must not slow resume down, and it does not: it is two calls on the
+critical path (one netlink round trip, one transient timer), measured at
+**+0.013s** from `PM: suspend exit`. An earlier `systemctl stop` added to the
+hook to clear stale timers was measured costing **0.2–0.6s** and was removed for
+exactly this reason. Nothing else may be added inline to that script.
+
+### Verifying
+
+```sh
+check-resume-clean.sh
+```
+
+Prints the six teardown signals for the most recent resume and a verdict:
+
+```
+  --- signals that mean the radio was torn down and rebuilt ---
+  802.11 deauthentication        none      OK
+  supplicant iface deinit        none      OK
+  beacon loss                    none      OK
+  DHCP transaction restart       none      OK
+  connection reactivation        none      OK
+  forced to unmanaged            none      OK
+
+  --- time from resume to usable ---
+  new DHCP lease (wlo1)          none      OK
+
+  VERDICT: CONTINUOUS -- Wi-Fi was never taken down across this sleep.
+            (no DHCP lease either -- the old lease survived untouched)
+```
+
+`CONTINUOUS` is the goal. `REASSOCIATED` means NM took the radio down and
+rebuilt it — which is what the brief disconnect on the hotspot actually is.
+It also prints a per-cycle table and auto-detects the newest boot containing a
+resume, so it still works after a reboot.
+
+### Caveats
+
+- Sleeping again within ~3s of resuming falls back to NetworkManager's normal
+  behaviour for that one cycle. It self-heals on the next cycle.
+- Magic-packet and disconnect wake remain possible. Unavoidable: keeping the
+  radio associated across suspend *requires* WoWLAN to be armed.
+- Known driver-level noise, unrelated to this fix but triggered by arming WoWLAN
+  at all: `rtw89_8852ae` logs `c2h reg timeout`, `wow: failed to get aoac rpt`,
+  `SER catches error: 0x3000` and `chip is no power when resume` around the
+  suspend/resume boundary. See [Driver: rtw89 WoWLAN Firmware Errors](#driver-rtw89-wowlan-firmware-errors).
+
+---
+
+## Driver: rtw89 WoWLAN Firmware Errors
+
+Observed on the RTL8852AE (`rtw89_8852ae`) whenever WoWLAN is armed, at both
+ends of the suspend boundary:
+
+```
+rtw89_8852ae 0000:01:00.0: failed to set wakeup event
+rtw89_8852ae 0000:01:00.0: failed to suspend for wow -1
+rtw89_8852ae 0000:01:00.0: Unknown wakeup reason 0
+rtw89_8852ae 0000:01:00.0: c2h reg timeout
+rtw89_8852ae 0000:01:00.0: wow: failed to get aoac rpt by reg
+rtw89_8852ae 0000:01:00.0: wow: failed to get aoac rpt by pkt
+rtw89_8852ae 0000:01:00.0: timed out to flush pci txch: 0
+rtw89_8852ae 0000:01:00.0: FW does not process h2c registers
+```
+
+The firmware fails to complete its WoWLAN suspend and its matching resume, and
+the driver recovers by resetting the firmware. This is a driver/firmware bug,
+not a NetworkManager one, and it is *not* caused by the sleep hook — it appears
+any time WoWLAN is armed.
+
+It is recorded here because it is the leading suspect for any residual
+resume-time jank that is not attributable to the network path. Not yet
+diagnosed; treat it as an open item rather than a solved one.
+
+---
+
 ## Post-Install Actions
 
 ### Bat Theme Cache
@@ -545,13 +716,14 @@ zsh -c 'rm -f ~/.zcompdump && autoload -Uz compinit && compinit'
 
 ### Local Bin Scripts
 
-Three scripts in `~/.local/bin/` (made executable with `chmod +x`):
+Scripts in `~/.local/bin/` (made executable with `chmod +x`):
 
-| Script | Purpose |
-|--------|---------|
-| `lid-wifi-fix.sh` | Re-enables WiFi after lid close (rfkill + nmcli) |
-| `screenoff` | Lock session + turn off screen (Wayland) or blank framebuffer (TTY) |
-| `screenon` | Unlock session (Wayland) or unblank framebuffer (TTY) |
+| Script | Purpose | Tracked? |
+|--------|---------|----------|
+| `lid-wifi-fix.sh` | Re-enables WiFi after lid close (rfkill + nmcli) | no |
+| `screenoff` | Lock session + turn off screen (Wayland) or blank framebuffer (TTY) | yes |
+| `screenon` | Unlock session (Wayland) or unblank framebuffer (TTY) | yes |
+| `check-resume-clean.sh` | Verifies Wi-Fi survived suspend without a teardown (see [Wi-Fi Across Suspend](#wi-fi-across-suspend)) | yes |
 
 ### thefuck Python 3.14 Patch
 
@@ -583,7 +755,7 @@ echo ".fbtermrc" >> ~/.gitignore  # or tracked in .dotfiles.git/info/exclude
 
 ## Tracked Files (Full List)
 
-These are the files managed by the bare git repo as of the last commit:
+These are the files managed by the repo as of the last commit:
 
 ```
 .bash_profile
@@ -591,6 +763,9 @@ These are the files managed by the bare git repo as of the last commit:
 .config/Trolltech.conf
 .config/bat/themes/tokyonight_night.tmTheme
 .config/btop/btop.conf
+.config/etc/NetworkManager/conf.d/20-wifi-wowlan.conf   ← root-owned, deployed by hand
+.config/etc/systemd/system/hp-keycodes.service           ← root-owned, deployed by hand
+.config/etc/usr/lib/systemd/system-sleep/wifi-wowlan-resume.sh  ← root-owned, deployed by hand
 .config/fastfetch/config.jsonc
 .config/fontconfig/fonts.conf
 .config/gtk-3.0/settings.ini
@@ -611,8 +786,16 @@ These are the files managed by the bare git repo as of the last commit:
 .config/tmux/tmux.conf
 .config/tmux/tmux.reset.conf
 .config/xsettingsd/xsettingsd.conf
+.local/bin/check-resume-clean.sh
+.local/bin/screenoff
+.local/bin/screenon
 .fbtermrc          ← excluded from tracking via `dotfiles rm --cached`
 ```
+
+Files under `.config/etc/` are **copies of root-owned system files**, not
+symlinks — a `$HOME` git worktree cannot track `/etc` or `/usr`. They are
+deployed manually; see [Wi-Fi Across Suspend](#wi-fi-across-suspend) and
+[Keyboard: Keyd](#keyboard-keyd).
 
 ---
 
@@ -633,9 +816,47 @@ If setting up a new machine:
    git --git-dir=$HOME/.dotfiles.git fetch origin
    git --git-dir=$HOME/.dotfiles.git --work-tree=$HOME reset origin/main
    ```
+
+   > **Superseded.** This bare-repo-with-`$HOME`-worktree scheme is what the
+   > original setup used, but it is no longer what this machine runs — the
+   > working repo is now a normal clone at `~/dotfiles-backup`, and the
+   > `dotfiles` alias points there. Prefer:
+   >
+   > ```sh
+   > git clone git@github.com:Hrushikesh-Narala/dotfiles-backup.git ~/dotfiles-backup
+   > ```
+   >
+   > A normal clone is required for the two root-owned files to be tracked at
+   > all: `.config/etc/...` only works because the repo has its own working
+   > tree. Files are then copied between `~/dotfiles-backup` and `$HOME` by hand
+   > rather than checked out in place. The stale `~/.dotfiles.git` can be deleted
+   > once you are happy nothing depends on it.
 8. Install TPM + plugins: start tmux, press `prefix + I`
 9. Restart keyd: `sudo systemctl enable --now keyd`
 10. Rebuild caches: `bat cache --build`, `fc-cache -fv`
 11. Create main tmux session: `tmux new-session -d -s main`
-12. Start kitty
-13. Place wallpaper at `~/Pictures/aaa.jpg`
+12. Deploy the root-owned system files (a `$HOME` worktree cannot track these, so they are stored as copies under `.config/etc/`):
+    ```sh
+    cd ~/dotfiles-backup
+
+    # Wi-Fi stays associated across suspend -- see "Wi-Fi Across Suspend"
+    sudo install -m 644 .config/etc/NetworkManager/conf.d/20-wifi-wowlan.conf \
+      /etc/NetworkManager/conf.d/20-wifi-wowlan.conf
+    sudo install -m 755 .config/etc/usr/lib/systemd/system-sleep/wifi-wowlan-resume.sh \
+      /usr/lib/systemd/system-sleep/wifi-wowlan-resume.sh
+    sudo systemctl restart NetworkManager
+
+    # Verification script
+    install -m 755 .local/bin/check-resume-clean.sh ~/.local/bin/
+
+    # Keyboard: Keyd
+    sudo install -m 644 .config/keyd/default.conf /etc/keyd/default.conf
+    sudo install -m 644 .config/etc/systemd/system/hp-keycodes.service \
+      /etc/systemd/system/hp-keycodes.service
+    ```
+    No `daemon-reload` is needed for the sleep hook: systemd executes files in
+    `/usr/lib/systemd/system-sleep/` as plain scripts, so it is live on the
+    next sleep. Confirm with `check-resume-clean.sh` after one sleep/wake cycle
+    — expect `VERDICT: CONTINUOUS`.
+13. Start kitty
+14. Place wallpaper at `~/Pictures/aaa.jpg`
